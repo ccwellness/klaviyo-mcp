@@ -191,6 +191,7 @@ class TestFlowMetrics:
         assert set(d.keys()) == {
             "flow_id",
             "flow_message_id",
+            "flow_message_name",
             "send_channel",
             "sent",
             "delivered",

@@ -6,7 +6,8 @@ builds a real KlaviyoService, and makes low-cost live calls:
   1. klaviyo_list_accounts            — proves the registry loads and keys resolve
   2. klaviyo_get_campaign_performance  (last 30 days) — proves Klaviyo API access
   3. klaviyo_get_flows                 — proves flows:read scope is present
-  4. klaviyo_get_performance_over_time (flow, weekly, last 90 days) — series check
+  4. klaviyo_get_flow_structure        — fetches ordered actions for the first flow
+  5. klaviyo_get_performance_over_time (flow, weekly, last 90 days) — series check
 
 Usage:
     python live_smoke.py --account acme
@@ -56,7 +57,7 @@ def main() -> int:
         return 1
 
     print(
-        f"[1/5] Config loaded — revision={cfg.revision}, "
+        f"[1/6] Config loaded — revision={cfg.revision}, "
         f"accounts_file={cfg.accounts_file or '(none found)'}"
     )
 
@@ -67,11 +68,14 @@ def main() -> int:
         print(f"FAIL service build: {exc.code} — {exc.message}", file=sys.stderr)
         return 1
 
-    print("[2/5] Service built — all account keys resolved from environment")
+    print("[2/6] Service built — all account keys resolved from environment")
 
     # Collect per-check pass/fail so we can print a summary at the end.
     # Flows may be a soft warning when the key lacks flows:read.
     results: dict[str, str] = {}
+
+    # Track the first available flow id for the structure check below.
+    first_flow_id: str | None = None
 
     # Step 3a: list_accounts (no Klaviyo API call; proves registry loaded)
     print("\n--- klaviyo_list_accounts ---")
@@ -119,6 +123,9 @@ def main() -> int:
         flows_data = flows_response.to_dict()
         flow_count = flows_data.get("data", {}).get("flow_count", 0)
         flows_list = flows_data.get("data", {}).get("flows", [])
+        # Capture the first flow id for the structure check.
+        if flows_list:
+            first_flow_id = flows_list[0].get("flow_id")
         print(f"flow_count: {flow_count}")
         for flow in flows_list[:5]:
             print(
@@ -145,7 +152,89 @@ def main() -> int:
                 print(f"  details: {exc.details}", file=sys.stderr)
             results["get_flows"] = f"FAIL ({exc.code})"
 
-    # Step 3d: over-time series — flow, weekly, last 90 days
+    # Step 3d: flow structure for the first flow found above
+    print(f"\n--- klaviyo_get_flow_structure (flow_id={first_flow_id}) ---")
+    if first_flow_id is None:
+        print("SKIP — no flows returned by get_flows; skipping structure check.")
+        results["get_flow_structure"] = "SKIP (no flows available)"
+    else:
+        try:
+            struct_response = service.get_flow_structure(args.account, first_flow_id)
+            struct_data = struct_response.to_dict().get("data", {})
+            action_count = struct_data.get("action_count", 0)
+            summary = struct_data.get("summary", {})
+            steps = struct_data.get("steps", [])
+            print(f"flow_id: {first_flow_id}")
+            print(f"action_count: {action_count}")
+            print(f"summary: {json.dumps(summary, default=str)}")
+            send_steps = [s for s in steps if s.get("action_type") in ("SEND_EMAIL", "SEND_SMS")]
+            print(f"send steps ({len(send_steps)} total), first 3:")
+            for step in send_steps[:3]:
+                print(
+                    f"  action_id={step.get('action_id')}  "
+                    f"type={step.get('action_type')}  "
+                    f"message_name={step.get('message_name')!r}  "
+                    f"channel={step.get('channel')}"
+                )
+            results["get_flow_structure"] = "PASS"
+        except KlaviyoServiceError as exc:
+            is_scope_error = exc.code == "INVALID_API_KEY" or exc.http_status in (401, 403)
+            if is_scope_error:
+                print(
+                    f"WARN get_flow_structure: {exc.code} — {exc.message}\n"
+                    "  Hint: the account's private key may lack the 'flows:read' scope.",
+                    file=sys.stderr,
+                )
+                results["get_flow_structure"] = "WARN (possible missing flows:read scope)"
+            else:
+                print(
+                    f"FAIL get_flow_structure: {exc.code} — {exc.message}",
+                    file=sys.stderr,
+                )
+                if exc.details:
+                    print(f"  details: {exc.details}", file=sys.stderr)
+                results["get_flow_structure"] = f"FAIL ({exc.code})"
+
+        # Demonstrate resolve_message_names=True on a single-flow performance call.
+        # Scoped to one flow id to minimise API calls; we reuse the 30-day window.
+        print(
+            f"\n--- klaviyo_get_flow_performance with resolve_message_names=True "
+            f"(flow={first_flow_id}, {start_date} to {end_date}) ---"
+        )
+        try:
+            named_response = service.get_flow_performance(
+                args.account,
+                start_date,
+                end_date,
+                flow=first_flow_id,
+                resolve_message_names=True,
+            )
+            named_data = named_response.to_dict().get("data", {})
+            named_rows = named_data.get("flows", [])
+            print(f"rows returned: {len(named_rows)}")
+            for row in named_rows[:3]:
+                print(
+                    f"  flow_message_id={row.get('flow_message_id')}  "
+                    f"flow_message_name={row.get('flow_message_name')!r}  "
+                    f"channel={row.get('send_channel')}"
+                )
+            results["flow_performance_named"] = "PASS"
+        except KlaviyoServiceError as exc:
+            is_scope_error = exc.code == "INVALID_API_KEY" or exc.http_status in (401, 403)
+            if is_scope_error:
+                print(
+                    f"WARN flow_performance (named): {exc.code} — {exc.message}",
+                    file=sys.stderr,
+                )
+                results["flow_performance_named"] = "WARN (possible missing flows:read scope)"
+            else:
+                print(
+                    f"FAIL flow_performance (named): {exc.code} — {exc.message}",
+                    file=sys.stderr,
+                )
+                results["flow_performance_named"] = f"FAIL ({exc.code})"
+
+    # Step 3e: over-time series — flow, weekly, last 90 days
     ot_start = (date.today() - timedelta(days=90)).isoformat()
     ot_end = date.today().isoformat()
     print(
@@ -186,10 +275,10 @@ def main() -> int:
             overall_pass = False
 
     if overall_pass:
-        print(f"\n[5/5] PASS — account={account_used}")
+        print(f"\n[6/6] PASS — account={account_used}")
         return 0
     else:
-        print("\n[5/5] FAIL — one or more checks failed (see above)", file=sys.stderr)
+        print("\n[6/6] FAIL — one or more checks failed (see above)", file=sys.stderr)
         return 1
 
 

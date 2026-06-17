@@ -76,13 +76,14 @@ class TestListToolsFive:
         "klaviyo_get_campaign_performance",
         "klaviyo_get_flows",
         "klaviyo_get_flow_performance",
+        "klaviyo_get_flow_structure",
         "klaviyo_get_performance_over_time",
     }
 
-    def test_exactly_five_tools(self, mock_service):
+    def test_exactly_six_tools(self, mock_service):
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
-        assert len(tools) == 5
+        assert len(tools) == 6
 
     def test_get_flows_tool_present(self, mock_service):
         with _inject_service(mock_service):

@@ -122,12 +122,16 @@ class FlowMetrics:
     unsubscribes: float
     conversions: float
     conversion_value: float
+    # Resolved only when the caller opts in (``resolve_message_names=True``); ``None`` by
+    # default so existing callers and serialization are unchanged when names are not fetched.
+    flow_message_name: str | None = None
 
     def to_dict(self) -> dict:
         """Return a plain dict for JSON serialization on both interfaces."""
         return {
             "flow_id": self.flow_id,
             "flow_message_id": self.flow_message_id,
+            "flow_message_name": self.flow_message_name,
             "send_channel": self.send_channel,
             "sent": self.sent,
             "delivered": self.delivered,
@@ -140,6 +144,33 @@ class FlowMetrics:
             "unsubscribes": self.unsubscribes,
             "conversions": self.conversions,
             "conversion_value": self.conversion_value,
+        }
+
+
+@dataclass(frozen=True)
+class FlowStep:
+    """One ordered action in a flow's structure from ``GET /api/flows/{id}/flow-actions``.
+
+    ``action_type`` is the Klaviyo action kind (e.g. ``SEND_EMAIL``, ``SEND_SMS``,
+    ``TIME_DELAY``, ``BOOLEAN_BRANCH``). For send actions the message identity is resolved
+    via ``/api/flow-actions/{id}/flow-messages`` and attached as ``message_id``/
+    ``message_name``/``channel``; non-send actions (delays, branches) leave those ``None``.
+    """
+
+    action_id: str
+    action_type: str | None
+    message_id: str | None
+    message_name: str | None
+    channel: str | None
+
+    def to_dict(self) -> dict:
+        """Return a plain dict for JSON serialization on both interfaces."""
+        return {
+            "action_id": self.action_id,
+            "action_type": self.action_type,
+            "message_id": self.message_id,
+            "message_name": self.message_name,
+            "channel": self.channel,
         }
 
 

@@ -10,7 +10,9 @@ beyond the plain dicts the client returns.
 
 from __future__ import annotations
 
+import re
 import time
+from dataclasses import replace
 from datetime import date
 from typing import TYPE_CHECKING
 from urllib.parse import quote
@@ -22,6 +24,7 @@ from klaviyo_analytics.errors import KlaviyoServiceError
 from klaviyo_analytics.schemas import (
     CampaignMetrics,
     FlowMetrics,
+    FlowStep,
     FlowSummary,
     ReportPeriod,
     ResponseMeta,
@@ -41,6 +44,14 @@ _CAMPAIGN_VALUES_PATH = "/api/campaign-values-reports"
 _FLOW_VALUES_PATH = "/api/flow-values-reports"
 _FLOW_SERIES_PATH = "/api/flow-series-reports"
 _FLOWS_PATH = "/api/flows"
+_FLOW_MESSAGES_PATH = "/api/flow-messages"
+
+# Klaviyo resource ids are alphanumeric; this pattern gates any id interpolated into a path
+# (e.g. ``flow_id`` for the flow-structure endpoint) so no caller text can alter the URL.
+_RESOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]+$")
+
+# Flow action types whose message identity is resolvable via the flow-messages relationship.
+_SEND_ACTION_TYPES: frozenset[str] = frozenset({"SEND_EMAIL", "SEND_SMS"})
 
 # Report ``data.type`` values, paired one-to-one with their endpoint paths above.
 _CAMPAIGN_VALUES_TYPE = "campaign-values-report"
@@ -188,6 +199,7 @@ class KlaviyoService:
         start_date: str,
         end_date: str,
         flow: str | None = None,
+        resolve_message_names: bool = False,
     ) -> ServiceResponse:
         """Fetch per-(flow, message, channel) performance for an account over a date range.
 
@@ -196,6 +208,11 @@ class KlaviyoService:
         open/click/bounce rates per ``metrics.py``, and shapes the result rows into
         ``FlowMetrics``. An optional ``flow`` filters to a single flow id. The event-time vs.
         send-date ``time_basis`` is surfaced as a warning, as for campaigns.
+
+        When ``resolve_message_names`` is True, each distinct ``flow_message_id`` is looked up
+        once via ``GET /api/flow-messages/{id}`` and its name attached to the matching rows; a
+        failed/nameless lookup leaves ``flow_message_name`` as ``None`` and never blocks the
+        metrics. The default (False) adds no extra calls and is byte-identical to before.
         """
         resolved = self._registry.resolve(account)
         period = self._validated_period(start_date, end_date)
@@ -205,6 +222,8 @@ class KlaviyoService:
 
         body, latency_ms = self._timed_post(resolved.api_key, _FLOW_VALUES_PATH, attributes)
         rows = self._shape_flow_results(body, flow)
+        if resolve_message_names:
+            rows = self._with_message_names(resolved.api_key, rows)
         data = {
             "flows": [row.to_dict() for row in rows],
             "flow_count": len(rows),
@@ -216,6 +235,36 @@ class KlaviyoService:
             latency_ms=latency_ms,
         )
         return ServiceResponse(data=data, metadata=meta, warnings=(metrics.TIME_BASIS_NOTE,))
+
+    def get_flow_structure(self, account: str | None, flow_id: str) -> ServiceResponse:
+        """Return a flow's ordered actions with resolved message names on send steps.
+
+        Resolves ``account``, validates ``flow_id`` (alphanumeric; it is interpolated into the
+        request path), and fetches the flow's actions in flow order via
+        ``GET /api/flows/{flow_id}/flow-actions``. Each action becomes a ``FlowStep``; for
+        ``SEND_EMAIL``/``SEND_SMS`` actions the first related flow-message's id/name/channel is
+        attached. The response data carries ``flow_id``, ``action_count``, the ordered
+        ``steps``, and a ``summary`` count of actions by type.
+        """
+        resolved = self._registry.resolve(account)
+        validated_id = self._validated_resource_id(flow_id, "flow_id")
+        path = f"{_FLOWS_PATH}/{quote(validated_id, safe='')}/flow-actions"
+        actions = self._client.get_paginated(resolved.api_key, path)
+        steps = [self._shape_flow_step(resolved.api_key, action) for action in actions]
+        present = [step for step in steps if step is not None]
+        data = {
+            "flow_id": validated_id,
+            "action_count": len(present),
+            "steps": [step.to_dict() for step in present],
+            "summary": self._action_type_summary(present),
+        }
+        meta = ResponseMeta(
+            account=resolved.name,
+            period=None,
+            revision=self._cfg.revision,
+            latency_ms=None,
+        )
+        return ServiceResponse(data=data, metadata=meta)
 
     # -- Over-time series -----------------------------------------------------
 
@@ -361,6 +410,21 @@ class KlaviyoService:
             raise KlaviyoServiceError(
                 "INVALID_ARGUMENT",
                 "status must be a single alphanumeric flow status (e.g. 'live', 'draft')",
+                http_status=400,
+            )
+        return cleaned
+
+    def _validated_resource_id(self, value: str, name: str) -> str:
+        """Return ``value`` when it is an alphanumeric Klaviyo id, else raise INVALID_ARGUMENT.
+
+        Resource ids are interpolated into request paths, so they are gated to alphanumerics
+        (Klaviyo's id alphabet) to ensure no caller text can alter the URL structure.
+        """
+        cleaned = value.strip()
+        if not _RESOURCE_ID_PATTERN.match(cleaned):
+            raise KlaviyoServiceError(
+                "INVALID_ARGUMENT",
+                f"{name} must be an alphanumeric Klaviyo id",
                 http_status=400,
             )
         return cleaned
@@ -533,6 +597,107 @@ class KlaviyoService:
             conversions=_to_float(stats.get(metrics.CONVERSIONS)),
             conversion_value=_to_float(stats.get(metrics.CONVERSION_VALUE)),
         )
+
+    # -- Flow message-name resolution -----------------------------------------
+
+    def _with_message_names(self, api_key: str, rows: list[FlowMetrics]) -> list[FlowMetrics]:
+        """Attach ``flow_message_name`` to each row, looking up each distinct id once.
+
+        Distinct ``flow_message_id``s are resolved via ``GET /api/flow-messages/{id}`` (deduped
+        so an id is fetched at most once); a failed or nameless lookup maps to ``None`` and
+        never raises. Rows without a ``flow_message_id`` are returned unchanged.
+        """
+        distinct_ids = {row.flow_message_id for row in rows if row.flow_message_id}
+        names = {
+            message_id: self._fetch_message_name(api_key, message_id) for message_id in distinct_ids
+        }
+        return [self._row_with_name(row, names) for row in rows]
+
+    def _row_with_name(self, row: FlowMetrics, names: dict[str, str | None]) -> FlowMetrics:
+        """Return ``row`` with its resolved ``flow_message_name`` filled in (or unchanged)."""
+        resolved_name = names.get(row.flow_message_id) if row.flow_message_id else None
+        if resolved_name is None:
+            return row
+        return replace(row, flow_message_name=resolved_name)
+
+    def _fetch_message_name(self, api_key: str, message_id: str) -> str | None:
+        """Return a flow-message's name from ``GET /api/flow-messages/{id}``, or None.
+
+        The endpoint returns a single ``data`` object; a non-alphanumeric id, a failed lookup,
+        or a missing name all yield ``None`` so name resolution never blocks the metrics.
+        """
+        if not _RESOURCE_ID_PATTERN.match(message_id):
+            return None
+        path = f"{_FLOW_MESSAGES_PATH}/{quote(message_id, safe='')}"
+        try:
+            body = self._client.get(api_key, path)
+        except KlaviyoServiceError:
+            log.info("klaviyo.flow_message.lookup_failed", message_id=message_id)
+            return None
+        data = body.get("data")
+        attributes = data.get("attributes") if isinstance(data, dict) else None
+        name = attributes.get("name") if isinstance(attributes, dict) else None
+        return _opt_str(name)
+
+    # -- Flow structure shaping -----------------------------------------------
+
+    def _shape_flow_step(self, api_key: str, action: dict) -> FlowStep | None:
+        """Build one ``FlowStep`` from a flow-action row, resolving sends; None without an id."""
+        action_id = action.get("id")
+        if not isinstance(action_id, str) or not action_id:
+            return None
+        raw_attributes = action.get("attributes")
+        attributes: dict = raw_attributes if isinstance(raw_attributes, dict) else {}
+        action_type = _opt_str(attributes.get("action_type"))
+        message = self._resolve_send_message(api_key, action_id, action_type)
+        return FlowStep(
+            action_id=action_id,
+            action_type=action_type,
+            message_id=message[0],
+            message_name=message[1],
+            channel=message[2],
+        )
+
+    def _resolve_send_message(
+        self, api_key: str, action_id: str, action_type: str | None
+    ) -> tuple[str | None, str | None, str | None]:
+        """Return ``(message_id, name, channel)`` for a send action, else a triple of None.
+
+        Non-send actions (delays, branches) resolve nothing. For a send action the first
+        message from ``GET /api/flow-actions/{id}/flow-messages`` is read; a failed lookup or an
+        empty relationship yields a triple of ``None`` and never raises.
+        """
+        if action_type not in _SEND_ACTION_TYPES:
+            return (None, None, None)
+        # Defense in depth: action_id is Klaviyo-sourced; revalidate before interpolating it
+        # into the path, mirroring _fetch_message_name (quote already neutralizes it).
+        if not _RESOURCE_ID_PATTERN.match(action_id):
+            return (None, None, None)
+        path = f"/api/flow-actions/{quote(action_id, safe='')}/flow-messages"
+        try:
+            messages = self._client.get_paginated(api_key, path)
+        except KlaviyoServiceError:
+            log.info("klaviyo.flow_action.messages_failed", action_id=action_id)
+            return (None, None, None)
+        if not messages:
+            return (None, None, None)
+        first = messages[0]
+        message_id = first.get("id")
+        raw_attributes = first.get("attributes")
+        attributes: dict = raw_attributes if isinstance(raw_attributes, dict) else {}
+        return (
+            message_id if isinstance(message_id, str) and message_id else None,
+            _opt_str(attributes.get("name")),
+            _opt_str(attributes.get("channel")),
+        )
+
+    def _action_type_summary(self, steps: list[FlowStep]) -> dict[str, int]:
+        """Return a count of steps grouped by ``action_type`` (unknown types keyed 'UNKNOWN')."""
+        summary: dict[str, int] = {}
+        for step in steps:
+            key = step.action_type or "UNKNOWN"
+            summary[key] = summary.get(key, 0) + 1
+        return summary
 
     # -- Series shaping -------------------------------------------------------
 

@@ -261,7 +261,7 @@ class TestFlowPerformanceEndpoint:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", None
+            "acme", "2025-01-01", "2025-01-31", None, False
         )
 
     def test_optional_flow_filter_forwarded(self, client, mock_service):

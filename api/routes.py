@@ -133,6 +133,18 @@ def flow_performance() -> tuple[Response, int]:
             _require(body.get("start_date"), "start_date"),
             _require(body.get("end_date"), "end_date"),
             body.get("flow"),
+            bool(body.get("resolve_message_names", False)),
+        )
+    )
+
+
+@klaviyo_bp.get("/v1/flows/<flow_id>/structure")
+def flow_structure(flow_id: str) -> tuple[Response, int]:
+    """Return a flow's ordered actions with resolved message names on send steps."""
+    return _ok(
+        _service().get_flow_structure(
+            request.args.get("account"),
+            _require(flow_id, "flow_id"),
         )
     )
 

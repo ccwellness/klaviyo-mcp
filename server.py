@@ -120,6 +120,15 @@ def handle_flow_performance(service: KlaviyoService, args: dict) -> ServiceRespo
         _require(args.get("start_date"), "start_date"),
         _require(args.get("end_date"), "end_date"),
         args.get("flow"),
+        bool(args.get("resolve_message_names", False)),
+    )
+
+
+def handle_flow_structure(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Return a flow's ordered actions with resolved message names on send steps."""
+    return service.get_flow_structure(
+        args.get("account"),
+        _require(args.get("flow_id"), "flow_id"),
     )
 
 
@@ -142,6 +151,7 @@ HANDLERS: dict[str, Handler] = {
     "klaviyo_get_campaign_performance": handle_campaign_performance,
     "klaviyo_get_flows": handle_get_flows,
     "klaviyo_get_flow_performance": handle_flow_performance,
+    "klaviyo_get_flow_structure": handle_flow_structure,
     "klaviyo_get_performance_over_time": handle_performance_over_time,
 }
 
@@ -229,8 +239,36 @@ async def list_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Optional Klaviyo flow id to filter to one flow.",
                     },
+                    "resolve_message_names": {
+                        "type": "boolean",
+                        "description": (
+                            "When true, resolve each flow_message_id to its human message "
+                            "name (one extra lookup per distinct message; default false)."
+                        ),
+                    },
                 },
                 "required": ["start_date", "end_date"],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_flow_structure",
+            description=(
+                "Return a flow's ordered actions (sends, time delays, conditional splits) with "
+                "resolved message names on send steps. Each step carries action_id, "
+                "action_type, and — for SEND_EMAIL/SEND_SMS actions — message_id, "
+                "message_name, and channel. Also returns action_count and a summary count of "
+                "actions by type."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": _ACCOUNT_DESC},
+                    "flow_id": {
+                        "type": "string",
+                        "description": "The Klaviyo flow id whose structure to return.",
+                    },
+                },
+                "required": ["flow_id"],
             },
         ),
         Tool(

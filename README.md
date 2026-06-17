@@ -238,6 +238,17 @@ curl -X POST \
      -d '{"account": "acme", "start_date": "2025-01-01", "end_date": "2025-01-31"}' \
      http://127.0.0.1:8080/v1/flows/performance
 
+# Flow structure
+curl -H "X-API-Key: your-rest-secret" \
+     "http://127.0.0.1:8080/v1/flows/PPF7K3ABCD/structure?account=acme"
+
+# Flow performance with resolved message names
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "start_date": "2025-01-01", "end_date": "2025-01-31", "resolve_message_names": true}' \
+     http://127.0.0.1:8080/v1/flows/performance
+
 # Over-time series (weekly flow trend)
 curl -X POST \
      -H "X-API-Key: your-rest-secret" \
@@ -259,7 +270,7 @@ The Klaviyo private key configured for each account must have these scopes:
 | `accounts:read` | All tools (account resolution) |
 | `metrics:read` | All report tools |
 | `campaigns:read` | `klaviyo_get_campaign_performance` |
-| `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_performance_over_time` |
+| `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_flow_structure`, `klaviyo_get_performance_over_time` |
 
 Report endpoints (`/api/campaign-values-reports`, `/api/flow-values-reports`,
 `/api/flow-series-reports`) are rate-limited by
@@ -283,7 +294,8 @@ open, click, and bounce rates locally from the raw count statistics.
 | `klaviyo_list_accounts` | `GET /v1/accounts` | — | `accounts[]{name, label}` |
 | `klaviyo_get_campaign_performance` | `POST /v1/campaigns/performance` | `start_date`, `end_date`, `campaign?` | `campaigns[]{campaign_id, campaign_name, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `campaign_count` |
 | `klaviyo_get_flows` | `GET /v1/flows` | `status?`, `archived?` | `flows[]{flow_id, name, status, trigger_type, archived, created, updated}`, `flow_count` |
-| `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`, `end_date`, `flow?` | `flows[]{flow_id, flow_message_id, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
+| `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`, `end_date`, `flow?`, `resolve_message_names?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
+| `klaviyo_get_flow_structure` | `GET /v1/flows/<flow_id>/structure` | `flow_id` (required), `account?` | `flow_id`, `action_count`, `steps[]{action_id, action_type, message_id, message_name, channel}`, `summary{action_type: count}` |
 | `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`, `end_date`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
 
 ---
@@ -437,12 +449,28 @@ channel (email or SMS).
 | `start_date` | string | Yes | Inclusive start date, `YYYY-MM-DD` |
 | `end_date` | string | Yes | Inclusive end date, `YYYY-MM-DD` |
 | `flow` | string | No | Klaviyo flow id — filters results to one flow |
+| `resolve_message_names` | boolean | No | When `true`, resolve each `flow_message_id` to its human-readable message name (default `false`) |
 
 The date range may not exceed 366 days (one year). Engagement and conversion
 statistics are attributed by event time; `sent` is anchored to the message send
 date. See the `warnings` array in the response for the time-basis note.
 
-**Output:**
+**`resolve_message_names` details:**
+
+By default (`false`) each row carries `flow_message_id` only, and no additional
+API calls are made. When `true`, each distinct `flow_message_id` is looked up
+once via `GET /api/flow-messages/{id}` and the resulting name is attached as
+`flow_message_name` on every matching row. Lookups are deduped — if ten rows
+share the same message id, Klaviyo is called exactly once for that id. A failed
+or missing name lookup leaves `flow_message_name` as `null` and never blocks the
+metrics from returning.
+
+The flow-messages endpoint is on a lighter rate-limit tier (3 requests/second,
+60 requests/minute) compared to the report endpoints, so name resolution is
+suitable for interactive queries but should be avoided in tight polling loops.
+The `flows:read` scope already required by this tool covers the name lookups.
+
+**Output (with `resolve_message_names: true`):**
 
 ```json
 {
@@ -451,6 +479,7 @@ date. See the `warnings` array in the response for the time-basis note.
       {
         "flow_id": "XYZABC123",
         "flow_message_id": "MSGDEF456",
+        "flow_message_name": "Post-Purchase Day 1 Email",
         "send_channel": "email",
         "sent": 5200.0,
         "delivered": 5100.0,
@@ -479,10 +508,125 @@ date. See the `warnings` array in the response for the time-basis note.
 }
 ```
 
-Rates are `null` when the denominator is zero. Requires the `flows:read` scope.
+`flow_message_name` is always present in the output; it is `null` when
+`resolve_message_names` is `false` or when a lookup fails. Rates are `null`
+when the denominator is zero. Requires the `flows:read` scope.
 
 **REST equivalent:** `POST /v1/flows/performance` with a JSON body containing
 the same fields.
+
+```bash
+# With name resolution enabled
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "start_date": "2025-03-01", "end_date": "2025-03-31", "resolve_message_names": true}' \
+     http://127.0.0.1:8080/v1/flows/performance
+```
+
+---
+
+### `klaviyo_get_flow_structure`
+
+Return the ordered list of actions in a flow, with send steps enriched with
+their resolved message name and channel. Useful for auditing flow logic,
+cross-referencing message ids from `klaviyo_get_flow_performance`, and
+understanding a flow's shape before diving into its metrics.
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `account` | string | No* | Canonical account name. Required when more than one account is configured. |
+| `flow_id` | string | Yes | The Klaviyo flow id whose structure to return |
+
+`flow_id` must be an alphanumeric Klaviyo id. It is validated before being
+interpolated into the request path. Requires the `flows:read` scope.
+
+**Output:**
+
+```json
+{
+  "data": {
+    "flow_id": "PPF7K3ABCD",
+    "action_count": 20,
+    "steps": [
+      {
+        "action_id": "ACT001",
+        "action_type": "SEND_EMAIL",
+        "message_id": "MSG001",
+        "message_name": "Post-Purchase: Thank You",
+        "channel": "email"
+      },
+      {
+        "action_id": "ACT002",
+        "action_type": "TIME_DELAY",
+        "message_id": null,
+        "message_name": null,
+        "channel": null
+      },
+      {
+        "action_id": "ACT003",
+        "action_type": "BOOLEAN_BRANCH",
+        "message_id": null,
+        "message_name": null,
+        "channel": null
+      },
+      {
+        "action_id": "ACT004",
+        "action_type": "SEND_EMAIL",
+        "message_id": "MSG002",
+        "message_name": "Post-Purchase: Day 3 Cross-Sell",
+        "channel": "email"
+      },
+      {
+        "action_id": "ACT005",
+        "action_type": "TIME_DELAY",
+        "message_id": null,
+        "message_name": null,
+        "channel": null
+      },
+      {
+        "action_id": "ACT006",
+        "action_type": "SEND_EMAIL",
+        "message_id": "MSG003",
+        "message_name": "Post-Purchase: Day 7 Review Request",
+        "channel": "email"
+      }
+    ],
+    "summary": {
+      "SEND_EMAIL": 9,
+      "TIME_DELAY": 8,
+      "BOOLEAN_BRANCH": 3
+    }
+  },
+  "metadata": {
+    "account": "acme",
+    "period": null,
+    "revision": "2025-04-15",
+    "latency_ms": null
+  },
+  "warnings": []
+}
+```
+
+Steps are returned in flow order as Klaviyo provides them. For `SEND_EMAIL` and
+`SEND_SMS` actions the service fetches the first related flow-message via
+`GET /api/flow-actions/{id}/flow-messages` and attaches its `message_id`,
+`message_name`, and `channel`. A failed lookup leaves those three fields as
+`null` without blocking the rest of the steps. Non-send actions (`TIME_DELAY`,
+`BOOLEAN_BRANCH`, and similar) always have `null` for the message fields.
+
+`summary` is a count of steps keyed by `action_type`. Types not known at
+write-time are keyed as-is (Klaviyo may add new action types); an action with
+an unparseable type is counted under `"UNKNOWN"`.
+
+**REST equivalent:** `GET /v1/flows/<flow_id>/structure`
+
+```bash
+curl -H "X-API-Key: your-rest-secret" \
+     "http://127.0.0.1:8080/v1/flows/PPF7K3ABCD/structure?account=acme"
+```
 
 ---
 
@@ -606,11 +750,12 @@ before any shared or production release to ensure hash correctness.
 python live_smoke.py --account acme
 ```
 
-Makes real Klaviyo calls against four checks: account listing, campaign
-performance (last 30 days), flow listing, and an over-time weekly series
-(last 90 days). Requires a valid `.env` and `accounts.toml`. The flow checks
-require the `flows:read` scope; if the key lacks it the script prints a warning
-and continues rather than aborting. See `live_smoke.py` for details.
+Makes real Klaviyo calls against five checks: account listing, campaign
+performance (last 30 days), flow listing, flow structure (using the first flow
+returned by the listing step), and an over-time weekly series (last 90 days).
+Requires a valid `.env` and `accounts.toml`. The flow checks require the
+`flows:read` scope; if the key lacks it the script prints a warning and
+continues rather than aborting. See `live_smoke.py` for details.
 
 ---
 
@@ -633,6 +778,16 @@ and continues rather than aborting. See `live_smoke.py` for details.
 - 366-day date range cap enforced up front across all report tools
 - `flows:read` scope requirement documented
 
+**WP-2 — done:**
+
+- New MCP tool `klaviyo_get_flow_structure` and REST equivalent `GET /v1/flows/<flow_id>/structure`
+  — returns ordered flow actions with `action_id`, `action_type`, and (for send steps) resolved
+  `message_id`, `message_name`, and `channel`; plus `action_count` and a per-type `summary`
+- `resolve_message_names` option on `klaviyo_get_flow_performance` (default `false`): when `true`,
+  each distinct `flow_message_id` is resolved once via `GET /api/flow-messages/{id}` (deduped)
+  and attached as `flow_message_name` per row — delivers the previously-deferred flow-message
+  label resolution
+
 **Deferred to later work packages:**
 
 - `get_list_health` — list growth and health metrics
@@ -641,7 +796,7 @@ and continues rather than aborting. See `live_smoke.py` for details.
 - Auto-chunking for date ranges exceeding one year
 - Metric-aggregates endpoint (event-time series for list growth / unsubscribes)
 - Timeframe presets (`last_30_days`, etc.)
-- Per-flow rollup and flow-message label resolution
+- Per-flow rollup
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials
 - Campaign trends over time (would require stitching campaign-values across sub-windows, as Klaviyo has no campaign-series endpoint)

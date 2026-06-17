@@ -97,6 +97,16 @@ class KlaviyoClient:
         response = self._request_with_retry(api_key, "POST", path, json_body=payload)
         return self._decode(response)
 
+    def get(self, api_key: str, path: str) -> dict:
+        """GET a single JSON:API resource and return the parsed document as a plain dict.
+
+        Used for single-resource lookups (e.g. ``/api/flow-messages/{id}``); the caller reads
+        ``body["data"]``, which may be a single object or a list depending on the endpoint.
+        Retries transient statuses with backoff; maps any failure to a ``KlaviyoServiceError``.
+        """
+        response = self._request_with_retry(api_key, "GET", path)
+        return self._decode(response)
+
     def get_paginated(self, api_key: str, path: str) -> list[dict]:
         """GET a JSON:API collection, following ``links.next`` until exhausted.
 
