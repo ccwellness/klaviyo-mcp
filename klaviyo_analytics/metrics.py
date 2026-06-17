@@ -32,6 +32,22 @@ CAMPAIGN_STATISTICS: tuple[str, ...] = (
     CONVERSION_VALUE,
 )
 
+#: The statistics requested for every values report (campaigns and flows alike). Flows use
+#: the identical count set, so this alias names the shared contract without duplicating it.
+REPORT_STATISTICS: tuple[str, ...] = CAMPAIGN_STATISTICS
+
+#: The default statistics requested for an over-time series when the caller names none. A
+#: trend-friendly subset (volume + unique engagement + conversions) kept small so the
+#: returned arrays stay readable; the caller may override with their own ``statistics``.
+SERIES_DEFAULT_STATISTICS: tuple[str, ...] = (
+    RECIPIENTS,
+    DELIVERED,
+    OPENS_UNIQUE,
+    CLICKS_UNIQUE,
+    CONVERSIONS,
+    CONVERSION_VALUE,
+)
+
 # Klaviyo conversion/engagement metrics are attributed by the *event* timestamp, whereas the
 # campaign's "sent" count is anchored to its send time. This note is surfaced as a warning so
 # a reader does not mis-read a same-window conversion count as send-aligned.
@@ -65,3 +81,23 @@ def click_rate(clicks: float, delivered: float) -> float | None:
 def bounce_rate(bounces: float, sent: float) -> float | None:
     """Bounced messages divided by total recipients (Klaviyo's bounce-rate definition)."""
     return safe_rate(bounces, sent)
+
+
+def build_rate_block(
+    sent: float,
+    delivered: float,
+    opens: float,
+    clicks: float,
+    bounces: float,
+) -> dict[str, float | None]:
+    """Compute the derived open/click/bounce rates from a row's raw counts.
+
+    Both campaign and flow shaping need the same three rates from the same five counts, so
+    this is the single definition of the rate block (DRY, CS-003). Each rate is ``None`` when
+    its denominator is zero (undefined rather than a misleading ``0.0``).
+    """
+    return {
+        "open_rate": open_rate(opens, delivered),
+        "click_rate": click_rate(clicks, delivered),
+        "bounce_rate": bounce_rate(bounces, sent),
+    }

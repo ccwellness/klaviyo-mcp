@@ -1,7 +1,7 @@
 # klaviyo-mcp
 
-Klaviyo campaign-reporting tool for Claude. It exposes Klaviyo email campaign
-performance data through two transports that share one service layer:
+Klaviyo campaign and flow reporting tool for Claude. It exposes Klaviyo email
+and SMS performance data through two transports that share one service layer:
 
 - **MCP stdio** — Claude Desktop / Claude Code pick it up automatically via
   `.mcp.json`; no extra process to manage.
@@ -26,7 +26,7 @@ canonical names to the environment variable that holds each key.
 4. [Running the transports](#running-the-transports)
 5. [Tools and API reference](#tools-and-api-reference)
 6. [Dev workflow](#dev-workflow)
-7. [WP-0 scope and deferred work](#wp-0-scope-and-deferred-work)
+7. [Work package status](#work-package-status)
 8. [Troubleshooting](#troubleshooting)
 
 ---
@@ -226,11 +226,67 @@ curl -X POST \
      -H "Content-Type: application/json" \
      -d '{"account": "acme", "start_date": "2025-01-01", "end_date": "2025-01-31"}' \
      http://127.0.0.1:8080/v1/campaigns/performance
+
+# List flows (optional status + archived filters)
+curl -H "X-API-Key: your-rest-secret" \
+     "http://127.0.0.1:8080/v1/flows?account=acme&status=live"
+
+# Flow performance
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "start_date": "2025-01-01", "end_date": "2025-01-31"}' \
+     http://127.0.0.1:8080/v1/flows/performance
+
+# Over-time series (weekly flow trend)
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "entity": "flow", "start_date": "2025-01-01", "end_date": "2025-03-31", "interval": "weekly"}' \
+     http://127.0.0.1:8080/v1/performance/over-time
 ```
 
 ---
 
 ## Tools and API reference
+
+### API scopes required
+
+The Klaviyo private key configured for each account must have these scopes:
+
+| Scope | Used by |
+|---|---|
+| `accounts:read` | All tools (account resolution) |
+| `metrics:read` | All report tools |
+| `campaigns:read` | `klaviyo_get_campaign_performance` |
+| `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_performance_over_time` |
+
+Report endpoints (`/api/campaign-values-reports`, `/api/flow-values-reports`,
+`/api/flow-series-reports`) are rate-limited by
+Klaviyo to **1 request/second, 2 requests/minute, and 225 requests/day**. The
+client retries automatically with exponential backoff and jitter, honouring the
+`Retry-After` / `RateLimit-Reset` headers.
+
+### Over-time statistics note
+
+`klaviyo_get_performance_over_time` returns Klaviyo's statistic arrays verbatim
+(including rate statistics such as `open_rate` and `click_rate`). Each array is
+positionally aligned to `date_times`, exactly as Klaviyo provides them, so the
+numbers reconcile with the Klaviyo dashboard. By contrast, the values reports
+(`klaviyo_get_campaign_performance` and `klaviyo_get_flow_performance`) compute
+open, click, and bounce rates locally from the raw count statistics.
+
+### Tool summary
+
+| Tool | REST route | Key inputs | Key output fields |
+|---|---|---|---|
+| `klaviyo_list_accounts` | `GET /v1/accounts` | — | `accounts[]{name, label}` |
+| `klaviyo_get_campaign_performance` | `POST /v1/campaigns/performance` | `start_date`, `end_date`, `campaign?` | `campaigns[]{campaign_id, campaign_name, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `campaign_count` |
+| `klaviyo_get_flows` | `GET /v1/flows` | `status?`, `archived?` | `flows[]{flow_id, name, status, trigger_type, archived, created, updated}`, `flow_count` |
+| `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`, `end_date`, `flow?` | `flows[]{flow_id, flow_message_id, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
+| `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`, `end_date`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
+
+---
 
 ### `klaviyo_list_accounts`
 
@@ -319,6 +375,189 @@ containing the same fields.
 
 ---
 
+### `klaviyo_get_flows`
+
+List an account's flows with their lifecycle metadata. Does not return
+performance counts — use `klaviyo_get_flow_performance` for those.
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `account` | string | No* | Canonical account name. Required when more than one account is configured. |
+| `status` | string | No | Filter by flow status (e.g. `live`, `draft`, `manual`). Must be alphanumeric. |
+| `archived` | boolean | No | Filter to archived (`true`) or active (`false`) flows. |
+
+**Output:**
+
+```json
+{
+  "data": {
+    "flows": [
+      {
+        "flow_id": "XYZABC123",
+        "name": "Welcome Series",
+        "status": "live",
+        "trigger_type": "list",
+        "archived": false,
+        "created": "2024-01-15T10:00:00+00:00",
+        "updated": "2024-06-01T08:30:00+00:00"
+      }
+    ],
+    "flow_count": 1
+  },
+  "metadata": {
+    "account": "acme",
+    "period": null,
+    "revision": "2025-04-15",
+    "latency_ms": null
+  },
+  "warnings": []
+}
+```
+
+Follows Klaviyo cursor pagination automatically; returns all matching flows.
+Requires the `flows:read` scope on the account's private key.
+
+**REST equivalent:** `GET /v1/flows?account=acme&status=live&archived=false`
+
+---
+
+### `klaviyo_get_flow_performance`
+
+Per-(flow, message, channel) performance for one account over an absolute date
+range. Returns one row per unique combination of flow, flow message, and send
+channel (email or SMS).
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `account` | string | No* | Canonical account name. Required when more than one account is configured. |
+| `start_date` | string | Yes | Inclusive start date, `YYYY-MM-DD` |
+| `end_date` | string | Yes | Inclusive end date, `YYYY-MM-DD` |
+| `flow` | string | No | Klaviyo flow id — filters results to one flow |
+
+The date range may not exceed 366 days (one year). Engagement and conversion
+statistics are attributed by event time; `sent` is anchored to the message send
+date. See the `warnings` array in the response for the time-basis note.
+
+**Output:**
+
+```json
+{
+  "data": {
+    "flows": [
+      {
+        "flow_id": "XYZABC123",
+        "flow_message_id": "MSGDEF456",
+        "send_channel": "email",
+        "sent": 5200.0,
+        "delivered": 5100.0,
+        "opens": 1530.0,
+        "open_rate": 0.3,
+        "clicks": 255.0,
+        "click_rate": 0.05,
+        "bounces": 100.0,
+        "bounce_rate": 0.0192,
+        "unsubscribes": 8.0,
+        "conversions": 22.0,
+        "conversion_value": 1100.0
+      }
+    ],
+    "flow_count": 1
+  },
+  "metadata": {
+    "account": "acme",
+    "period": {"start_date": "2025-03-01", "end_date": "2025-03-31"},
+    "revision": "2025-04-15",
+    "latency_ms": 520.1
+  },
+  "warnings": [
+    "Engagement and conversion statistics are attributed by event time, while 'sent' is anchored to the campaign send date; counts in a short window may not align."
+  ]
+}
+```
+
+Rates are `null` when the denominator is zero. Requires the `flows:read` scope.
+
+**REST equivalent:** `POST /v1/flows/performance` with a JSON body containing
+the same fields.
+
+---
+
+### `klaviyo_get_performance_over_time`
+
+Bucketed over-time series for flows over an absolute date range. Returns a
+`date_times` array and one or more series rows, each with statistics arrays
+positionally aligned to `date_times`.
+
+Klaviyo provides time-series (bucketed) reports for flows only. There is no
+campaign-series endpoint — `/api/campaign-series-reports` does not exist and
+returns 404 at every API revision. For campaign totals use
+`klaviyo_get_campaign_performance` instead.
+
+Statistic arrays are returned as Klaviyo provides them, including rate
+statistics (e.g. `open_rate`, `click_rate`). See the [Over-time statistics
+note](#over-time-statistics-note) above.
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `account` | string | No* | Canonical account name. Required when more than one account is configured. |
+| `entity` | string | Yes | Must be `flow`. Klaviyo has no campaign time-series endpoint; use `klaviyo_get_campaign_performance` for campaign totals. |
+| `start_date` | string | Yes | Inclusive start date, `YYYY-MM-DD` |
+| `end_date` | string | Yes | Inclusive end date, `YYYY-MM-DD` |
+| `interval` | string | No | Bucket size: `hourly`, `daily`, `weekly` (default), or `monthly` |
+| `entity_id` | string | No | Klaviyo flow id — narrows results to one flow |
+| `statistics` | array of strings | No | Statistic names to request; defaults to a volume + engagement + conversion subset |
+
+The date range may not exceed 366 days. Passing an invalid `interval` or
+unsupported `entity` value returns an `INVALID_ARGUMENT` error.
+
+**Output:**
+
+```json
+{
+  "data": {
+    "entity": "flow",
+    "interval": "weekly",
+    "date_times": ["2025-03-03T00:00:00", "2025-03-10T00:00:00", "2025-03-17T00:00:00"],
+    "series": [
+      {
+        "groupings": {
+          "flow_id": "XYZABC123",
+          "flow_message_id": "MSGDEF456",
+          "send_channel": "email"
+        },
+        "statistics": {
+          "recipients": [1200.0, 0.0, 3400.0],
+          "delivered": [1180.0, 0.0, 3340.0],
+          "opens_unique": [354.0, 0.0, 1002.0],
+          "open_rate": [0.3, null, 0.3],
+          "clicks_unique": [59.0, 0.0, 167.0],
+          "conversions": [4.0, 0.0, 18.0],
+          "conversion_value": [200.0, 0.0, 900.0]
+        }
+      }
+    ]
+  },
+  "metadata": {
+    "account": "acme",
+    "period": {"start_date": "2025-03-01", "end_date": "2025-03-31"},
+    "revision": "2025-04-15",
+    "latency_ms": 387.6
+  },
+  "warnings": []
+}
+```
+
+**REST equivalent:** `POST /v1/performance/over-time` with a JSON body
+containing the same fields.
+
+---
+
 ## Dev workflow
 
 ### Linting and type checking
@@ -367,14 +606,17 @@ before any shared or production release to ensure hash correctness.
 python live_smoke.py --account acme
 ```
 
-Makes real Klaviyo calls. Requires a valid `.env` and `accounts.toml`. See
-`live_smoke.py` for details.
+Makes real Klaviyo calls against four checks: account listing, campaign
+performance (last 30 days), flow listing, and an over-time weekly series
+(last 90 days). Requires a valid `.env` and `accounts.toml`. The flow checks
+require the `flows:read` scope; if the key lacks it the script prints a warning
+and continues rather than aborting. See `live_smoke.py` for details.
 
 ---
 
-## WP-0 scope and deferred work
+## Work package status
 
-**WP-0 delivers:**
+**WP-0 — done:**
 
 - Two MCP tools: `klaviyo_list_accounts` and `klaviyo_get_campaign_performance`
 - REST equivalents: `GET /v1/accounts` and `POST /v1/campaigns/performance`
@@ -382,13 +624,27 @@ Makes real Klaviyo calls. Requires a valid `.env` and `accounts.toml`. See
 - Klaviyo Campaign Values Report integration with derived open/click/bounce rates
 - Retry/backoff, pagination, pinned API revision, structured logging
 
+**WP-1 — done:**
+
+- Three new MCP tools: `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_performance_over_time`
+- REST equivalents: `GET /v1/flows`, `POST /v1/flows/performance`, `POST /v1/performance/over-time`
+- Flow Values Report integration with per-(flow, message, channel) rows and derived rates
+- Over-time series (flow only — Klaviyo has no campaign-series endpoint) with Klaviyo-native statistic arrays passed through verbatim
+- 366-day date range cap enforced up front across all report tools
+- `flows:read` scope requirement documented
+
 **Deferred to later work packages:**
 
-- Additional Klaviyo report types (flows, segments, revenue by date)
-- Campaign filtering by channel, tag, or status
-- Caching layer to reduce upstream calls for repeated queries
+- `get_list_health` — list growth and health metrics
+- `compare_periods` — period-over-period delta tool
+- Response caching (NoOp → TTL cache)
+- Auto-chunking for date ranges exceeding one year
+- Metric-aggregates endpoint (event-time series for list growth / unsubscribes)
+- Timeframe presets (`last_30_days`, etc.)
+- Per-flow rollup and flow-message label resolution
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials
+- Campaign trends over time (would require stitching campaign-values across sub-windows, as Klaviyo has no campaign-series endpoint)
 - Containerisation (`Dockerfile`, `docker-compose.yml`)
 - CI pipeline (GitHub Actions)
 

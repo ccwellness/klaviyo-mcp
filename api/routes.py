@@ -55,6 +55,24 @@ def _require(value: Any, name: str) -> str:
     return value
 
 
+def _query_bool(raw: str | None, name: str) -> bool | None:
+    """Parse an optional ``true``/``false`` query param to a bool (absent -> None).
+
+    Query strings are always text, so this maps the documented literals to a bool and rejects
+    anything else with INVALID_ARGUMENT rather than silently treating it as false.
+    """
+    if raw is None:
+        return None
+    normalized = raw.strip().lower()
+    if normalized in ("true", "1"):
+        return True
+    if normalized in ("false", "0"):
+        return False
+    raise KlaviyoServiceError(
+        "INVALID_ARGUMENT", f"{name} must be 'true' or 'false'", http_status=400
+    )
+
+
 # -- health (auth-exempt) ----------------------------------------------------
 
 
@@ -86,5 +104,55 @@ def campaign_performance() -> tuple[Response, int]:
             _require(body.get("start_date"), "start_date"),
             _require(body.get("end_date"), "end_date"),
             body.get("campaign"),
+        )
+    )
+
+
+# -- flows -------------------------------------------------------------------
+
+
+@klaviyo_bp.get("/v1/flows")
+def flows() -> tuple[Response, int]:
+    """List an account's flows with their lifecycle metadata (optional status/archived filter)."""
+    return _ok(
+        _service().get_flows(
+            request.args.get("account"),
+            request.args.get("status"),
+            _query_bool(request.args.get("archived"), "archived"),
+        )
+    )
+
+
+@klaviyo_bp.post("/v1/flows/performance")
+def flow_performance() -> tuple[Response, int]:
+    """Per-(flow, message, channel) performance for an account over an absolute date range."""
+    body = _json_body()
+    return _ok(
+        _service().get_flow_performance(
+            body.get("account"),
+            _require(body.get("start_date"), "start_date"),
+            _require(body.get("end_date"), "end_date"),
+            body.get("flow"),
+        )
+    )
+
+
+# -- over-time series --------------------------------------------------------
+
+
+@klaviyo_bp.post("/v1/performance/over-time")
+def performance_over_time() -> tuple[Response, int]:
+    """Bucketed over-time series for campaigns or flows over an absolute date range."""
+    body = _json_body()
+    statistics = body.get("statistics")
+    return _ok(
+        _service().get_performance_over_time(
+            body.get("account"),
+            _require(body.get("entity"), "entity"),
+            _require(body.get("start_date"), "start_date"),
+            _require(body.get("end_date"), "end_date"),
+            body.get("interval", "weekly"),
+            body.get("entity_id"),
+            tuple(statistics) if isinstance(statistics, list) and statistics else None,
         )
     )

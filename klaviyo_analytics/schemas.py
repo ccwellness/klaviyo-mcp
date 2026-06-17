@@ -67,6 +67,101 @@ class CampaignMetrics:
 
 
 @dataclass(frozen=True)
+class FlowSummary:
+    """One flow's identity and lifecycle metadata from ``GET /api/flows`` (no performance).
+
+    These are the descriptive attributes Klaviyo returns for a flow — its name, lifecycle
+    ``status`` (e.g. ``live``/``draft``), the ``trigger_type`` that starts it, the
+    ``archived`` flag, and the ISO ``created``/``updated`` timestamps. Performance counts come
+    from a separate flow-values report (``FlowMetrics``).
+    """
+
+    flow_id: str
+    name: str | None
+    status: str | None
+    trigger_type: str | None
+    archived: bool | None
+    created: str | None
+    updated: str | None
+
+    def to_dict(self) -> dict:
+        """Return a plain dict for JSON serialization on both interfaces."""
+        return {
+            "flow_id": self.flow_id,
+            "name": self.name,
+            "status": self.status,
+            "trigger_type": self.trigger_type,
+            "archived": self.archived,
+            "created": self.created,
+            "updated": self.updated,
+        }
+
+
+@dataclass(frozen=True)
+class FlowMetrics:
+    """Per-(flow, flow message, channel) performance, mirroring ``CampaignMetrics``.
+
+    The Flow Values Report groups results by ``flow_id``, ``flow_message_id``, and
+    ``send_channel`` rather than by campaign, but the count + derived-rate block is identical
+    to ``CampaignMetrics`` (the rates come from ``metrics.py`` and are ``None`` when their
+    denominator is zero). A parallel dataclass keeps each model readable and frozen without a
+    shared mixin that would obscure the field list (CS-002/CS-017).
+    """
+
+    flow_id: str
+    flow_message_id: str | None
+    send_channel: str | None
+    sent: float
+    delivered: float
+    opens: float
+    open_rate: float | None
+    clicks: float
+    click_rate: float | None
+    bounces: float
+    bounce_rate: float | None
+    unsubscribes: float
+    conversions: float
+    conversion_value: float
+
+    def to_dict(self) -> dict:
+        """Return a plain dict for JSON serialization on both interfaces."""
+        return {
+            "flow_id": self.flow_id,
+            "flow_message_id": self.flow_message_id,
+            "send_channel": self.send_channel,
+            "sent": self.sent,
+            "delivered": self.delivered,
+            "opens": self.opens,
+            "open_rate": self.open_rate,
+            "clicks": self.clicks,
+            "click_rate": self.click_rate,
+            "bounces": self.bounces,
+            "bounce_rate": self.bounce_rate,
+            "unsubscribes": self.unsubscribes,
+            "conversions": self.conversions,
+            "conversion_value": self.conversion_value,
+        }
+
+
+@dataclass(frozen=True)
+class SeriesGroup:
+    """One over-time series row: its groupings plus statistic arrays aligned to date_times.
+
+    Each ``statistics`` entry is the list of bucketed values Klaviyo returns for that
+    statistic, positionally aligned to the report's top-level ``date_times``. The values are
+    passed through as-is (including any rate statistics) rather than recomputed, so a bucket's
+    numbers reconcile with Klaviyo's UI.
+    """
+
+    groupings: dict
+    statistics: dict[str, list]
+
+    def to_dict(self) -> dict:
+        """Return a plain dict for JSON serialization on both interfaces."""
+        return {"groupings": self.groupings, "statistics": self.statistics}
+
+
+@dataclass(frozen=True)
 class ResponseMeta:
     """Per-response metadata envelope.
 

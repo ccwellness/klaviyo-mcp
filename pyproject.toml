@@ -52,8 +52,9 @@ ignore = [
     "BLE001",   # broad exception in test helpers is acceptable
     "T201",     # print allowed in tests for debug output
 ]
-# live_smoke.py: standalone operator connectivity CLI; printing is its purpose.
-"live_smoke.py" = ["T201"]
+# live_smoke.py: standalone operator connectivity CLI. Printing is its purpose, and
+# its sequential PASS/FAIL/WARN flow over several checks is legitimately long/branchy.
+"live_smoke.py" = ["T201", "C901", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

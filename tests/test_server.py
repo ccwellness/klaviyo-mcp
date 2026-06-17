@@ -34,20 +34,28 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 
 
+_EXPECTED_TOOL_NAMES = {
+    "klaviyo_list_accounts",
+    "klaviyo_get_campaign_performance",
+    "klaviyo_get_flows",
+    "klaviyo_get_flow_performance",
+    "klaviyo_get_performance_over_time",
+}
+
+
 class TestListTools:
-    def test_returns_two_tools(self, mock_service):
+    def test_returns_five_tools(self, mock_service):
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
 
-        assert len(tools) == 2
+        assert len(tools) == 5
 
     def test_tool_names(self, mock_service):
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
 
         names = {t.name for t in tools}
-        assert "klaviyo_list_accounts" in names
-        assert "klaviyo_get_campaign_performance" in names
+        assert names == _EXPECTED_TOOL_NAMES
 
     def test_campaign_tool_requires_start_and_end_date(self, mock_service):
         with _inject_service(mock_service):

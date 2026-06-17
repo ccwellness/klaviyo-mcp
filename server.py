@@ -104,9 +104,45 @@ def handle_campaign_performance(service: KlaviyoService, args: dict) -> ServiceR
     )
 
 
+def handle_get_flows(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """List an account's flows with their lifecycle metadata."""
+    return service.get_flows(
+        args.get("account"),
+        args.get("status"),
+        args.get("archived"),
+    )
+
+
+def handle_flow_performance(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Fetch per-flow performance for an account over an absolute date range."""
+    return service.get_flow_performance(
+        args.get("account"),
+        _require(args.get("start_date"), "start_date"),
+        _require(args.get("end_date"), "end_date"),
+        args.get("flow"),
+    )
+
+
+def handle_performance_over_time(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Fetch a bucketed over-time series for a flow."""
+    statistics = args.get("statistics")
+    return service.get_performance_over_time(
+        args.get("account"),
+        _require(args.get("entity"), "entity"),
+        _require(args.get("start_date"), "start_date"),
+        _require(args.get("end_date"), "end_date"),
+        args.get("interval", "weekly"),
+        args.get("entity_id"),
+        tuple(statistics) if isinstance(statistics, list) and statistics else None,
+    )
+
+
 HANDLERS: dict[str, Handler] = {
     "klaviyo_list_accounts": handle_list_accounts,
     "klaviyo_get_campaign_performance": handle_campaign_performance,
+    "klaviyo_get_flows": handle_get_flows,
+    "klaviyo_get_flow_performance": handle_flow_performance,
+    "klaviyo_get_performance_over_time": handle_performance_over_time,
 }
 
 
@@ -117,7 +153,7 @@ HANDLERS: dict[str, Handler] = {
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
-    """Advertise the WP-0 tools with their JSON input schemas."""
+    """Advertise the available tools with their JSON input schemas."""
     return [
         Tool(
             name="klaviyo_list_accounts",
@@ -148,6 +184,95 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["start_date", "end_date"],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_flows",
+            description=(
+                "List an account's flows with their lifecycle metadata: flow_id, name, "
+                "status, trigger_type, archived, created, and updated. Optionally filter by "
+                "status (e.g. 'live', 'draft') and/or the archived flag. Returns no "
+                "performance counts (use klaviyo_get_flow_performance for those)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": _ACCOUNT_DESC},
+                    "status": {
+                        "type": "string",
+                        "description": "Optional flow status to filter by (e.g. 'live', 'draft').",
+                    },
+                    "archived": {
+                        "type": "boolean",
+                        "description": "Optional archived flag to filter by (true or false).",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_flow_performance",
+            description=(
+                "Per-(flow, message, channel) email/SMS performance for an account over a "
+                "date range: sent, delivered, opens, open_rate, clicks, click_rate, bounces, "
+                "bounce_rate, unsubscribes, conversions, and conversion_value, plus flow_id, "
+                "flow_message_id, and send_channel. Engagement/conversion stats are attributed "
+                "by event time; 'sent' is anchored to the send date (see the time_basis note)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": _ACCOUNT_DESC},
+                    "start_date": {"type": "string", "description": _DATE_DESC},
+                    "end_date": {"type": "string", "description": _DATE_DESC},
+                    "flow": {
+                        "type": "string",
+                        "description": "Optional Klaviyo flow id to filter to one flow.",
+                    },
+                },
+                "required": ["start_date", "end_date"],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_performance_over_time",
+            description=(
+                "Bucketed over-time series for a flow over a date range. Returns date_times "
+                "plus per-grouping statistic arrays positionally aligned to date_times. "
+                "interval is one of hourly, daily, weekly (default), or monthly. Optionally "
+                "narrow to one flow id (entity_id) and override the default statistics. The "
+                "date range may not exceed one year. Note: Klaviyo has no campaign time-series "
+                "endpoint — use klaviyo_get_campaign_performance for campaign totals."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": _ACCOUNT_DESC},
+                    "entity": {
+                        "type": "string",
+                        "enum": ["flow"],
+                        "description": "Entity to trend. Only 'flow' is supported by Klaviyo.",
+                    },
+                    "start_date": {"type": "string", "description": _DATE_DESC},
+                    "end_date": {"type": "string", "description": _DATE_DESC},
+                    "interval": {
+                        "type": "string",
+                        "enum": ["hourly", "daily", "weekly", "monthly"],
+                        "description": "Bucket size for the series (default 'weekly').",
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Optional flow id to filter the series to one flow.",
+                    },
+                    "statistics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Optional list of statistic names to trend; defaults to a "
+                            "volume + engagement + conversion subset."
+                        ),
+                    },
+                },
+                "required": ["entity", "start_date", "end_date"],
             },
         ),
     ]
