@@ -1,0 +1,66 @@
+# .pre-commit-config.yaml
+# Pre-commit hooks enforcing CS-006 / CS-009 / CS-019 / CS-020.
+#
+# Install: pre-commit install --hook-type commit-msg --hook-type pre-commit
+# Run manually: pre-commit run --all-files
+#
+# Hook stages:
+#   pre-commit  — lint, format, security scan (runs on every commit attempt)
+#   commit-msg  — conventional commit message format (CS-006)
+
+repos:
+  # ---------------------------------------------------------------------------
+  # Standard pre-commit-hooks: whitespace, file hygiene, large file guard
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: debug-statements
+        # Catches pdb/ipdb/breakpoint() left in code.
+
+  # ---------------------------------------------------------------------------
+  # Ruff — lint (with --fix) + format check (CS-020)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # ---------------------------------------------------------------------------
+  # detect-secrets — secret scanning (CS-009)
+  # Blocks commits containing high-entropy strings or known secret patterns.
+  # Baseline: .secrets.baseline (checked in; update with: detect-secrets scan > .secrets.baseline)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: |
+          (?x)^(
+            \.secrets\.baseline|
+            requirements\.txt|
+            requirements\.in
+          )$
+
+  # ---------------------------------------------------------------------------
+  # Conventional commits — commit message format (CS-006)
+  # Format: <type>(<scope>): <description>
+  # Types: feat|fix|docs|style|refactor|test|chore|ci|perf|build|revert
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.4.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+        args: [feat, fix, docs, style, refactor, test, chore, ci, perf, build, revert]

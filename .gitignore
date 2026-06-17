@@ -1,0 +1,104 @@
+# .gitignore — klaviyo-mcp project
+# Python, tooling caches, secrets, OS noise.
+# Does NOT ignore: klaviyo_analytics/, tests/, api/, server.py, requirements.*, accounts.toml
+
+# ---------------------------------------------------------------------------
+# Python bytecode and caches
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ---------------------------------------------------------------------------
+# Virtual environments
+# ---------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.env.local
+
+# ---------------------------------------------------------------------------
+# Build / packaging artefacts
+# ---------------------------------------------------------------------------
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+
+# ---------------------------------------------------------------------------
+# Test / coverage
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+nosetests.xml
+junit*.xml
+
+# ---------------------------------------------------------------------------
+# Type checking
+# ---------------------------------------------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# ---------------------------------------------------------------------------
+# Linter / formatter caches
+# ---------------------------------------------------------------------------
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Secrets and credentials — NEVER commit these (NFR-S2, CS-009)
+# ---------------------------------------------------------------------------
+# The .env file holds the Klaviyo API keys and REST secret — never commit it.
+.env
+# Any stray credential dumps.
+*credentials*.json
+# NOTE: .secrets.baseline IS committed (detect-secrets audit trail).
+# NOTE: accounts.toml IS committed (non-secret: env-var names + ids + labels only).
+
+# ---------------------------------------------------------------------------
+# pip-tools
+# ---------------------------------------------------------------------------
+# requirements.txt IS committed (the compiled lock file).
+
+# ---------------------------------------------------------------------------
+# OS noise
+# ---------------------------------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+# Linux
+*~
+
+# ---------------------------------------------------------------------------
+# IDE / editor
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*.iml
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+*.log
+logs/

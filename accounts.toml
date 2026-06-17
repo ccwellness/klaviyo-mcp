@@ -1,0 +1,33 @@
+# accounts.toml — SAMPLE FILE.  Replace these entries with your real accounts.
+#
+# This file is safe to commit: it contains only env var names, conversion metric
+# ids, and labels.  The actual API keys live in .env (never committed).
+#
+# The service searches for accounts.toml in this order (highest priority first):
+#   Windows : %APPDATA%\klaviyo-mcp\accounts.toml
+#   macOS   : ~/Library/Application Support/klaviyo-mcp/accounts.toml
+#   Linux   : ~/.config/klaviyo-mcp/accounts.toml
+#   Fallback: <repo root>/accounts.toml
+#
+# Set ACCOUNTS_FILE=/path/to/accounts.toml to use an explicit path.
+#
+# ---------------------------------------------------------------------------
+# Required keys per account section:
+#
+#   api_key_env          — name of the env var holding the Klaviyo private key
+#   conversion_metric_id — Klaviyo metric id used for conversion attribution
+#   label                — human-readable display name (shown by list_accounts)
+#
+# Account names (section headers) must be alphanumeric slugs:
+#   [a-z0-9][a-z0-9_-]{0,63}
+# ---------------------------------------------------------------------------
+
+[acme]
+api_key_env = "KLAVIYO_ACME_KEY"
+conversion_metric_id = "ABC123"
+label = "Acme Storefront"
+
+[widgets]
+api_key_env = "KLAVIYO_WIDGETS_KEY"
+conversion_metric_id = "XYZ789"
+label = "Widgets Co."

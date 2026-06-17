@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "klaviyo-api": {
+      "command": "python",
+      "args": ["C:\\Users\\jodom\\projects\\klaviyo-mcp\\server.py"]
+    }
+  }
+}

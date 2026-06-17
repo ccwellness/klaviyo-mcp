@@ -1,0 +1,124 @@
+# pyproject.toml — tool configuration only; no [build-system].
+# This project is NOT a packaged/installable distribution (launch: python server.py).
+# See CODING_STANDARDS CS-018/CS-020.
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter (CS-020)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",        # pycodestyle errors
+    "F",        # pyflakes
+    "I",        # isort import sorting
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    # Pylint refactor rules (CS-005)
+    "PLR0911",  # too-many-return-statements
+    "PLR0912",  # too-many-branches
+    "PLR0913",  # too-many-arguments (max-args=5)
+    "PLR0915",  # too-many-statements (max-statements=40)
+    # McCabe complexity (CS-005)
+    "C901",     # max-complexity=10
+    # Simplification
+    "SIM102",   # collapsible-if
+    "SIM103",   # needless-bool
+    # Error handling discipline (CS-007)
+    "E722",     # bare-except
+    "BLE001",   # blind-exception (broad except Exception)
+    # Banned patterns
+    "T201",     # print found (CS-019)
+    # Naming conventions (CS-013)
+    "N801",     # invalid-class-name
+    "N803",     # invalid-argument-name
+    "N806",     # non-lowercase-variable-in-function
+]
+ignore = [
+    # BLE001 is enforced globally on purpose. The only two places a broad
+    # `except Exception` is allowed are the adapter boundaries (server.py
+    # call_tool and api/__init__.py error handler); those two sites must
+    # carry an explicit `# noqa: BLE001` with a reason. Nothing is ignored here.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests: allow assert statements, magic numbers, and broad exception handling.
+"tests/**/*.py" = [
+    "S101",     # assert-used
+    "PLR2004",  # magic-value-comparison
+    "PLR0913",  # test builder helpers may need >5 keyword args
+    "BLE001",   # broad exception in test helpers is acceptable
+    "T201",     # print allowed in tests for debug output
+]
+# live_smoke.py: standalone operator connectivity CLI; printing is its purpose.
+"live_smoke.py" = ["T201"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 5
+max-statements = 40
+
+# ---------------------------------------------------------------------------
+# Mypy — type checking (gradually-strict)
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+# Lenient top-level defaults — tighten module-by-module as each is implemented.
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+# Strict typing on the klaviyo_analytics business modules.
+[[tool.mypy.overrides]]
+module = "klaviyo_analytics.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+
+# Lenient for tests — allow untyped helpers and fixtures.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+ignore_errors = false
+
+# ---------------------------------------------------------------------------
+# pytest (CS-004)
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Strict markers: any @pytest.mark.<name> must be declared here to avoid typos.
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: marks tests that require live Klaviyo API access (deselect with -m 'not integration')",
+    "slow: marks tests with notable runtime",
+    "unit: marks pure unit tests with all external calls mocked",
+]
+
+# ---------------------------------------------------------------------------
+# Coverage (CS-004)
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["klaviyo_analytics"]
+branch = true
+omit = [
+    "tests/*",
+]
+
+[tool.coverage.report]
+# Gate: 80% line coverage on klaviyo_analytics business modules (CS-004).
+fail_under = 80
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "@(abc\\.)?abstractmethod",
+]
