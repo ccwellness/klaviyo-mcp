@@ -41,15 +41,16 @@ _EXPECTED_TOOL_NAMES = {
     "klaviyo_get_flow_performance",
     "klaviyo_get_flow_structure",
     "klaviyo_get_performance_over_time",
+    "klaviyo_compare_periods",
 }
 
 
 class TestListTools:
-    def test_returns_six_tools(self, mock_service):
+    def test_returns_all_tools(self, mock_service):
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
 
-        assert len(tools) == 6
+        assert len(tools) == len(_EXPECTED_TOOL_NAMES)
 
     def test_tool_names(self, mock_service):
         with _inject_service(mock_service):

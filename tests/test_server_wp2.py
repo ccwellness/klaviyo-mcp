@@ -95,18 +95,18 @@ _EXPECTED_SIX_TOOL_NAMES = {
 
 
 class TestListToolsSix:
-    def test_returns_exactly_six_tools(self, mock_service):
+    def test_wp2_tools_present(self, mock_service):
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
 
-        assert len(tools) == 6
+        assert _EXPECTED_SIX_TOOL_NAMES <= {t.name for t in tools}
 
     def test_all_six_tool_names_present(self, mock_service):
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
 
         names = {t.name for t in tools}
-        assert names == _EXPECTED_SIX_TOOL_NAMES
+        assert _EXPECTED_SIX_TOOL_NAMES <= names
 
     def test_get_flow_structure_tool_present(self, mock_service):
         with _inject_service(mock_service):

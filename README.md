@@ -276,8 +276,8 @@ The Klaviyo private key configured for each account must have these scopes:
 |---|---|
 | `accounts:read` | All tools (account resolution) |
 | `metrics:read` | All report tools |
-| `campaigns:read` | `klaviyo_get_campaign_performance` |
-| `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_flow_structure`, `klaviyo_get_performance_over_time` |
+| `campaigns:read` | `klaviyo_get_campaign_performance`, `klaviyo_compare_periods` (entity `campaign`) |
+| `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_flow_structure`, `klaviyo_get_performance_over_time`, `klaviyo_compare_periods` (entity `flow`) |
 
 Report endpoints (`/api/campaign-values-reports`, `/api/flow-values-reports`,
 `/api/flow-series-reports`) are rate-limited by
@@ -330,6 +330,7 @@ today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
 | `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`+`end_date` **or** `timeframe`, `flow?`, `resolve_message_names?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
 | `klaviyo_get_flow_structure` | `GET /v1/flows/<flow_id>/structure` | `flow_id` (required), `account?` | `flow_id`, `action_count`, `steps[]{action_id, action_type, message_id, message_name, channel}`, `summary{action_type: count}` |
 | `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`+`end_date` **or** `timeframe`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
+| `klaviyo_compare_periods` | `POST /v1/performance/compare` | `entity` (`campaign`/`flow`), `start_date`+`end_date` **or** `timeframe`, `prior_start_date?`+`prior_end_date?`, `entity_id?` | `entity`, `current_period`, `prior_period`, `current_totals`, `prior_totals`, `deltas{metric:{absolute, pct_change}}`, `current_entity_count`, `prior_entity_count` |
 
 ---
 
@@ -744,6 +745,95 @@ containing the same fields.
 
 ---
 
+### `klaviyo_compare_periods`
+
+Compare **aggregate** campaign or flow performance between a current period and
+a prior period, returning per-metric absolute and percent-change deltas. Because
+campaigns are one-shot (a campaign sent in one period does not recur in another),
+the comparison is done on period *totals* — the summed counts across all rows,
+with rates rederived from those sums — rather than per-entity. Flows aggregate
+the same way and additionally accept an `entity_id` to trend a single flow over
+time.
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `account` | string | No* | Canonical account name. Required when more than one account is configured. |
+| `entity` | string | Yes | `campaign` or `flow`. |
+| `start_date` | string | No† | Inclusive start of the current period, `YYYY-MM-DD`. |
+| `end_date` | string | No† | Inclusive end of the current period, `YYYY-MM-DD`. |
+| `timeframe` | string | No† | Named relative window for the current period (see [Timeframe presets](#timeframe-presets)). |
+| `prior_start_date` | string | No | Explicit prior-period start. Provide with `prior_end_date`. |
+| `prior_end_date` | string | No | Explicit prior-period end. |
+| `entity_id` | string | No | Campaign/flow id to narrow both periods to one entity before aggregating. |
+
+† Set the current window with **either** `start_date`+`end_date` **or** `timeframe`.
+When `prior_start_date`/`prior_end_date` are omitted, the prior period defaults to
+the equal-length window ending the day before the current period starts (e.g. a
+30-day current window compares against the preceding 30 days). Explicit prior
+dates must be supplied as a pair.
+
+**Output:**
+
+```json
+{
+  "data": {
+    "entity": "campaign",
+    "current_period": {"start_date": "2025-03-01", "end_date": "2025-03-31"},
+    "prior_period": {"start_date": "2025-01-29", "end_date": "2025-02-28"},
+    "current_totals": {
+      "sent": 106147.0, "delivered": 104900.0, "opens": 36280.0, "open_rate": 0.3459,
+      "clicks": 5120.0, "click_rate": 0.0488, "bounces": 1247.0, "bounce_rate": 0.0117,
+      "unsubscribes": 210.0, "conversions": 125.0, "conversion_value": 45171.43
+    },
+    "prior_totals": {
+      "sent": 50284.0, "delivered": 49600.0, "opens": 18060.0, "open_rate": 0.3641,
+      "clicks": 2480.0, "click_rate": 0.05, "bounces": 620.0, "bounce_rate": 0.0123,
+      "unsubscribes": 95.0, "conversions": 68.0, "conversion_value": 29825.59
+    },
+    "deltas": {
+      "sent": {"absolute": 55863.0, "pct_change": 1.1109},
+      "conversions": {"absolute": 57.0, "pct_change": 0.8382},
+      "conversion_value": {"absolute": 15345.84, "pct_change": 0.5145},
+      "open_rate": {"absolute": -0.0182, "pct_change": -0.05}
+    },
+    "current_entity_count": 6,
+    "prior_entity_count": 3
+  },
+  "metadata": {
+    "account": "acme",
+    "period": {"start_date": "2025-03-01", "end_date": "2025-03-31"},
+    "revision": "2025-04-15",
+    "latency_ms": 980.2
+  },
+  "warnings": [
+    "Engagement and conversion statistics are attributed by event time, while 'sent' is anchored to the campaign send date; counts in a short window may not align."
+  ]
+}
+```
+
+`deltas` carries every metric in the totals (only a few are shown above).
+`absolute` is `current - prior`; `pct_change` is the fraction relative to the
+prior value (e.g. `1.1109` = +111%) and is `null` when the prior value is `0`.
+`metadata.period` echoes the **current** period. This tool makes two report
+calls (current + prior), so the report rate limit applies to each; the
+`time_basis` caveat is the same as the underlying performance reports.
+
+**REST equivalent:** `POST /v1/performance/compare` with a JSON body containing
+the same fields.
+
+```bash
+# Campaigns: this month vs. the preceding equal-length window
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "entity": "campaign", "timeframe": "this_month"}' \
+     http://127.0.0.1:8080/v1/performance/compare
+```
+
+---
+
 ## Dev workflow
 
 ### Linting and type checking
@@ -853,10 +943,19 @@ continues rather than aborting. See `live_smoke.py` for details.
   modules, and the unit suite with the coverage gate, all on Python 3.11
 - Lock file recompiled and hash-pinned under Python 3.11 (the project target)
 
+**WP-4 — done:**
+
+- New MCP tool `klaviyo_compare_periods` and REST equivalent `POST /v1/performance/compare`
+  — period-over-period aggregate comparison for campaigns or flows. Returns summed totals for a
+  current and a prior period (rates rederived from the sums) plus per-metric absolute and
+  percent-change deltas. The current window takes a `timeframe` preset or explicit dates; the
+  prior window defaults to the equal-length window immediately before it (overridable via
+  `prior_start_date`/`prior_end_date`). An optional `entity_id` trends a single campaign/flow.
+  See [`klaviyo_compare_periods`](#klaviyo_compare_periods)
+
 **Deferred to later work packages:**
 
 - `get_list_health` — list growth and health metrics
-- `compare_periods` — period-over-period delta tool
 - Response caching (NoOp → TTL cache)
 - Auto-chunking for date ranges exceeding one year
 - Metric-aggregates endpoint (event-time series for list growth / unsubscribes)

@@ -83,6 +83,19 @@ def bounce_rate(bounces: float, sent: float) -> float | None:
     return safe_rate(bounces, sent)
 
 
+def delta_block(current: float | None, prior: float | None) -> dict[str, float | None]:
+    """Absolute and fractional change between two metric values (either may be None).
+
+    ``absolute`` is ``current - prior`` (None when either side is None). ``pct_change`` is the
+    change relative to ``prior`` (e.g. ``0.25`` = +25%), rounded to 4 dp; it is None when either
+    value is None or when ``prior`` is 0 (division undefined, mirroring ``safe_rate``).
+    """
+    absolute = None if current is None or prior is None else round(current - prior, 4)
+    if current is None or prior is None or prior == 0:
+        return {"absolute": absolute, "pct_change": None}
+    return {"absolute": absolute, "pct_change": round((current - prior) / prior, 4)}
+
+
 def build_rate_block(
     sent: float,
     delivered: float,

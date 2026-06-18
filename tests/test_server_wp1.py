@@ -80,10 +80,10 @@ class TestListToolsFive:
         "klaviyo_get_performance_over_time",
     }
 
-    def test_exactly_six_tools(self, mock_service):
+    def test_expected_tools_present(self, mock_service):
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
-        assert len(tools) == 6
+        assert self._EXPECTED <= {t.name for t in tools}
 
     def test_get_flows_tool_present(self, mock_service):
         with _inject_service(mock_service):
@@ -107,7 +107,7 @@ class TestListToolsFive:
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
         names = {t.name for t in tools}
-        assert names == self._EXPECTED
+        assert self._EXPECTED <= names
 
     def test_flow_performance_offers_window_inputs(self, mock_service):
         # Dates and timeframe are alternatives, so neither is schema-required; both are offered.

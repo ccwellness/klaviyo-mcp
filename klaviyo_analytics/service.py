@@ -92,6 +92,28 @@ _TIMEFRAME_PRESETS: frozenset[str] = frozenset(
     }
 )
 
+# Entities that support period-over-period comparison. Campaigns are one-shot (a campaign sent
+# in one period won't appear in another), so comparison is done on period *aggregates* — the
+# summed counts across all rows, with rates rederived from those sums. Flows aggregate the same
+# way and also accept an ``entity_id`` to compare a single flow's totals over time.
+_COMPARE_ENTITIES: frozenset[str] = frozenset({"campaign", "flow"})
+
+# Metric fields carried in the compare totals and deltas, in output order. Both CampaignMetrics
+# and FlowMetrics expose every count field below, so the aggregation is entity-agnostic.
+_COMPARE_METRIC_FIELDS: tuple[str, ...] = (
+    "sent",
+    "delivered",
+    "opens",
+    "open_rate",
+    "clicks",
+    "click_rate",
+    "bounces",
+    "bounce_rate",
+    "unsubscribes",
+    "conversions",
+    "conversion_value",
+)
+
 
 def _to_float(value: object) -> float:
     """Coerce a Klaviyo statistic value to float; non-numeric/None becomes 0.0 (CS-016)."""
@@ -194,12 +216,7 @@ class KlaviyoService:
         """
         resolved = self._registry.resolve(account)
         period = self._resolve_period(timeframe, start_date, end_date)
-        attributes = self._build_report_attributes(
-            resolved, _CAMPAIGN_VALUES_TYPE, metrics.REPORT_STATISTICS, period
-        )
-
-        body, latency_ms = self._timed_post(resolved.api_key, _CAMPAIGN_VALUES_PATH, attributes)
-        rows = self._shape_results(body, campaign)
+        rows, latency_ms = self._fetch_campaign_metrics(resolved, period, campaign)
         data = {
             "campaigns": [row.to_dict() for row in rows],
             "campaign_count": len(rows),
@@ -270,12 +287,7 @@ class KlaviyoService:
         """
         resolved = self._registry.resolve(account)
         period = self._resolve_period(timeframe, start_date, end_date)
-        attributes = self._build_report_attributes(
-            resolved, _FLOW_VALUES_TYPE, metrics.REPORT_STATISTICS, period
-        )
-
-        body, latency_ms = self._timed_post(resolved.api_key, _FLOW_VALUES_PATH, attributes)
-        rows = self._shape_flow_results(body, flow)
+        rows, latency_ms = self._fetch_flow_metrics(resolved, period, flow)
         if resolve_message_names:
             rows = self._with_message_names(resolved.api_key, rows)
         data = {
@@ -370,6 +382,133 @@ class KlaviyoService:
             latency_ms=latency_ms,
         )
         return ServiceResponse(data=data, metadata=meta)
+
+    # -- Period-over-period comparison ----------------------------------------
+
+    def compare_periods(  # noqa: PLR0913 — fixed public compare surface (TRD §7)
+        self,
+        account: str | None,
+        entity: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        *,
+        timeframe: str | None = None,
+        prior_start_date: str | None = None,
+        prior_end_date: str | None = None,
+        entity_id: str | None = None,
+    ) -> ServiceResponse:
+        """Compare aggregate performance between a current period and a prior period.
+
+        The current window is given as a ``timeframe`` preset or explicit ``start_date``/
+        ``end_date`` (see ``_resolve_period``). The prior window defaults to the equal-length
+        window immediately preceding the current one, or may be set explicitly via
+        ``prior_start_date``/``prior_end_date``. ``entity`` is ``campaign`` or ``flow``; an
+        optional ``entity_id`` narrows both periods to a single campaign/flow id before
+        aggregating. Each period's rows are summed into totals (rates rederived from the sums
+        per ``metrics``), and per-metric absolute and percent deltas are returned. The same
+        event-time vs. send-date ``time_basis`` caveat applies as for the underlying reports.
+        """
+        resolved = self._registry.resolve(account)
+        self._validate_compare_entity(entity)
+        current = self._resolve_period(timeframe, start_date, end_date)
+        prior = self._resolve_prior_period(current, prior_start_date, prior_end_date)
+
+        cur_rows, cur_latency = self._compare_fetch(resolved, entity, current, entity_id)
+        pri_rows, pri_latency = self._compare_fetch(resolved, entity, prior, entity_id)
+        current_totals = self._aggregate_totals(cur_rows)
+        prior_totals = self._aggregate_totals(pri_rows)
+        deltas = {
+            field: metrics.delta_block(current_totals[field], prior_totals[field])
+            for field in _COMPARE_METRIC_FIELDS
+        }
+        data = {
+            "entity": entity,
+            "current_period": current.to_dict(),
+            "prior_period": prior.to_dict(),
+            "current_totals": current_totals,
+            "prior_totals": prior_totals,
+            "deltas": deltas,
+            "current_entity_count": len(cur_rows),
+            "prior_entity_count": len(pri_rows),
+        }
+        meta = ResponseMeta(
+            account=resolved.name,
+            period=current,
+            revision=self._cfg.revision,
+            latency_ms=round(cur_latency + pri_latency, 4),
+        )
+        return ServiceResponse(data=data, metadata=meta, warnings=(metrics.TIME_BASIS_NOTE,))
+
+    def _validate_compare_entity(self, entity: str) -> None:
+        """Raise INVALID_ARGUMENT unless ``entity`` is one of the comparable entities."""
+        if entity not in _COMPARE_ENTITIES:
+            allowed = ", ".join(sorted(_COMPARE_ENTITIES))
+            raise KlaviyoServiceError(
+                "INVALID_ARGUMENT",
+                f"entity {entity!r} is not supported; expected one of: {allowed}",
+                http_status=400,
+            )
+
+    def _compare_fetch(
+        self,
+        account: AccountConfig,
+        entity: str,
+        period: ReportPeriod,
+        entity_id: str | None,
+    ) -> tuple[list, float]:
+        """Fetch the period's rows for ``entity`` (optionally filtered to one id)."""
+        if entity == "campaign":
+            return self._fetch_campaign_metrics(account, period, entity_id)
+        return self._fetch_flow_metrics(account, period, entity_id)
+
+    def _resolve_prior_period(
+        self,
+        current: ReportPeriod,
+        prior_start_date: str | None,
+        prior_end_date: str | None,
+    ) -> ReportPeriod:
+        """Resolve the comparison baseline window.
+
+        When neither explicit prior date is given, the baseline is the equal-length window
+        ending the day before ``current`` starts. Explicit prior dates must be supplied as a
+        pair and are validated like any other period.
+        """
+        if prior_start_date is not None or prior_end_date is not None:
+            if prior_start_date is None or prior_end_date is None:
+                raise KlaviyoServiceError(
+                    "INVALID_ARGUMENT",
+                    "prior_start_date and prior_end_date must be provided together",
+                    http_status=400,
+                )
+            return self._validated_period(prior_start_date, prior_end_date)
+        cur_start = date.fromisoformat(current.start_date)
+        cur_end = date.fromisoformat(current.end_date)
+        span = cur_end - cur_start
+        prior_end = cur_start - timedelta(days=1)
+        prior_start = prior_end - span
+        return ReportPeriod(start_date=prior_start.isoformat(), end_date=prior_end.isoformat())
+
+    def _aggregate_totals(self, rows: list) -> dict:
+        """Sum the metric counts across ``rows`` and rederive the rates from the sums."""
+        sent = sum(row.sent for row in rows)
+        delivered = sum(row.delivered for row in rows)
+        opens = sum(row.opens for row in rows)
+        clicks = sum(row.clicks for row in rows)
+        bounces = sum(row.bounces for row in rows)
+        rates = metrics.build_rate_block(sent, delivered, opens, clicks, bounces)
+        return {
+            "sent": sent,
+            "delivered": delivered,
+            "opens": opens,
+            "open_rate": rates["open_rate"],
+            "clicks": clicks,
+            "click_rate": rates["click_rate"],
+            "bounces": bounces,
+            "bounce_rate": rates["bounce_rate"],
+            "unsubscribes": sum(row.unsubscribes for row in rows),
+            "conversions": sum(row.conversions for row in rows),
+            "conversion_value": sum(row.conversion_value for row in rows),
+        }
 
     # -- Request building -----------------------------------------------------
 
@@ -561,6 +700,34 @@ class KlaviyoService:
         body = self._client.post(api_key, path, attributes)
         latency_ms = (time.perf_counter() - started) * 1000
         return (body, latency_ms)
+
+    def _fetch_campaign_metrics(
+        self, account: AccountConfig, period: ReportPeriod, campaign: str | None
+    ) -> tuple[list[CampaignMetrics], float]:
+        """Run the Campaign Values Report for ``period`` and return shaped rows + latency.
+
+        Extracted so both ``get_campaign_performance`` and ``compare_periods`` issue the exact
+        same report request and shaping for a period (DRY, CS-003).
+        """
+        attributes = self._build_report_attributes(
+            account, _CAMPAIGN_VALUES_TYPE, metrics.REPORT_STATISTICS, period
+        )
+        body, latency_ms = self._timed_post(account.api_key, _CAMPAIGN_VALUES_PATH, attributes)
+        return self._shape_results(body, campaign), latency_ms
+
+    def _fetch_flow_metrics(
+        self, account: AccountConfig, period: ReportPeriod, flow: str | None
+    ) -> tuple[list[FlowMetrics], float]:
+        """Run the Flow Values Report for ``period`` and return shaped rows + latency.
+
+        The flow counterpart of ``_fetch_campaign_metrics``; message-name resolution stays with
+        the caller so the comparison path adds no extra lookups.
+        """
+        attributes = self._build_report_attributes(
+            account, _FLOW_VALUES_TYPE, metrics.REPORT_STATISTICS, period
+        )
+        body, latency_ms = self._timed_post(account.api_key, _FLOW_VALUES_PATH, attributes)
+        return self._shape_flow_results(body, flow), latency_ms
 
     # -- Response shaping -----------------------------------------------------
 

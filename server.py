@@ -158,6 +158,20 @@ def handle_performance_over_time(service: KlaviyoService, args: dict) -> Service
     )
 
 
+def handle_compare_periods(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Compare aggregate campaign/flow performance between a current and a prior period."""
+    return service.compare_periods(
+        args.get("account"),
+        _require(args.get("entity"), "entity"),
+        args.get("start_date"),
+        args.get("end_date"),
+        timeframe=args.get("timeframe"),
+        prior_start_date=args.get("prior_start_date"),
+        prior_end_date=args.get("prior_end_date"),
+        entity_id=args.get("entity_id"),
+    )
+
+
 HANDLERS: dict[str, Handler] = {
     "klaviyo_list_accounts": handle_list_accounts,
     "klaviyo_get_campaign_performance": handle_campaign_performance,
@@ -165,6 +179,7 @@ HANDLERS: dict[str, Handler] = {
     "klaviyo_get_flow_performance": handle_flow_performance,
     "klaviyo_get_flow_structure": handle_flow_structure,
     "klaviyo_get_performance_over_time": handle_performance_over_time,
+    "klaviyo_compare_periods": handle_compare_periods,
 }
 
 
@@ -337,6 +352,56 @@ async def list_tools() -> list[Tool]:
                         "description": (
                             "Optional list of statistic names to trend; defaults to a "
                             "volume + engagement + conversion subset."
+                        ),
+                    },
+                },
+                "required": ["entity"],
+            },
+        ),
+        Tool(
+            name="klaviyo_compare_periods",
+            description=(
+                "Compare aggregate campaign or flow performance between a current period and a "
+                "prior period. Returns summed totals for each period (sent, delivered, opens, "
+                "open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, "
+                "conversion_value) plus per-metric absolute and percent-change deltas. Set the "
+                "current window with a 'timeframe' preset or start_date+end_date; the prior "
+                "window defaults to the equal-length window immediately before it (override with "
+                "prior_start_date+prior_end_date). entity is 'campaign' or 'flow'; entity_id "
+                "narrows both periods to one campaign/flow id."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": _ACCOUNT_DESC},
+                    "entity": {
+                        "type": "string",
+                        "enum": ["campaign", "flow"],
+                        "description": "Entity to compare: 'campaign' or 'flow'.",
+                    },
+                    "start_date": {"type": "string", "description": _DATE_DESC},
+                    "end_date": {"type": "string", "description": _DATE_DESC},
+                    "timeframe": {
+                        "type": "string",
+                        "enum": _TIMEFRAME_VALUES,
+                        "description": _TIMEFRAME_DESC,
+                    },
+                    "prior_start_date": {
+                        "type": "string",
+                        "description": (
+                            "Optional explicit prior-period start (YYYY-MM-DD). Provide with "
+                            "prior_end_date to override the default preceding window."
+                        ),
+                    },
+                    "prior_end_date": {
+                        "type": "string",
+                        "description": "Optional explicit prior-period end (YYYY-MM-DD).",
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional campaign/flow id to narrow both periods to one entity "
+                            "before aggregating."
                         ),
                     },
                 },

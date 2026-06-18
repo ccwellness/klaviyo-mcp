@@ -171,3 +171,21 @@ def performance_over_time() -> tuple[Response, int]:
             timeframe=body.get("timeframe"),
         )
     )
+
+
+@klaviyo_bp.post("/v1/performance/compare")
+def compare_periods() -> tuple[Response, int]:
+    """Period-over-period aggregate comparison for campaigns or flows."""
+    body = _json_body()
+    return _ok(
+        _service().compare_periods(
+            body.get("account"),
+            _require(body.get("entity"), "entity"),
+            body.get("start_date"),
+            body.get("end_date"),
+            timeframe=body.get("timeframe"),
+            prior_start_date=body.get("prior_start_date"),
+            prior_end_date=body.get("prior_end_date"),
+            entity_id=body.get("entity_id"),
+        )
+    )
