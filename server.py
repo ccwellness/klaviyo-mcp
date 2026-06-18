@@ -111,6 +111,7 @@ def handle_campaign_performance(service: KlaviyoService, args: dict) -> ServiceR
         args.get("end_date"),
         args.get("campaign"),
         timeframe=args.get("timeframe"),
+        resolve_campaign_names=bool(args.get("resolve_campaign_names", False)),
     )
 
 
@@ -224,6 +225,14 @@ async def list_tools() -> list[Tool]:
                     "campaign": {
                         "type": "string",
                         "description": "Optional Klaviyo campaign id to filter to one campaign.",
+                    },
+                    "resolve_campaign_names": {
+                        "type": "boolean",
+                        "description": (
+                            "When true, resolve each campaign_id to its human campaign name "
+                            "(one extra lookup per distinct campaign; default false). Otherwise "
+                            "campaign_name falls back to the send channel."
+                        ),
                     },
                 },
                 "required": [],

@@ -45,6 +45,7 @@ _FLOW_VALUES_PATH = "/api/flow-values-reports"
 _FLOW_SERIES_PATH = "/api/flow-series-reports"
 _FLOWS_PATH = "/api/flows"
 _FLOW_MESSAGES_PATH = "/api/flow-messages"
+_CAMPAIGNS_PATH = "/api/campaigns"
 
 # Klaviyo resource ids are alphanumeric; this pattern gates any id interpolated into a path
 # (e.g. ``flow_id`` for the flow-structure endpoint) so no caller text can alter the URL.
@@ -195,7 +196,7 @@ class KlaviyoService:
 
     # -- Campaign performance -------------------------------------------------
 
-    def get_campaign_performance(
+    def get_campaign_performance(  # noqa: PLR0913 — fixed public campaign surface (TRD §7)
         self,
         account: str | None,
         start_date: str | None = None,
@@ -203,6 +204,7 @@ class KlaviyoService:
         campaign: str | None = None,
         *,
         timeframe: str | None = None,
+        resolve_campaign_names: bool = False,
     ) -> ServiceResponse:
         """Fetch per-campaign performance for an account over a date range.
 
@@ -213,10 +215,18 @@ class KlaviyoService:
         ``_resolve_period``). An optional ``campaign`` filters the results to a single campaign
         id. The event-time vs. send-date ``time_basis`` is recorded as a warning so the caller
         can interpret the counts correctly.
+
+        When ``resolve_campaign_names`` is True, each distinct ``campaign_id`` is looked up once
+        via ``GET /api/campaigns/{id}`` and its name attached as ``campaign_name`` (the Campaign
+        Values Report groups by id and channel, not name). A failed lookup leaves the existing
+        fallback (the send channel) in place and never blocks the metrics. The default (False)
+        adds no extra calls and is byte-identical to before.
         """
         resolved = self._registry.resolve(account)
         period = self._resolve_period(timeframe, start_date, end_date)
         rows, latency_ms = self._fetch_campaign_metrics(resolved, period, campaign)
+        if resolve_campaign_names:
+            rows = self._with_campaign_names(resolved.api_key, rows)
         data = {
             "campaigns": [row.to_dict() for row in rows],
             "campaign_count": len(rows),
@@ -793,6 +803,52 @@ class KlaviyoService:
         """Return a human campaign name from the groupings when Klaviyo supplies one."""
         name = groupings.get("campaign_name") or groupings.get("send_channel")
         return name if isinstance(name, str) and name else None
+
+    # -- Campaign name resolution ---------------------------------------------
+
+    def _with_campaign_names(
+        self, api_key: str, rows: list[CampaignMetrics]
+    ) -> list[CampaignMetrics]:
+        """Attach the resolved ``campaign_name`` to each row, looking up each id once.
+
+        Mirrors ``_with_message_names``: distinct ``campaign_id``s are resolved via
+        ``GET /api/campaigns/{id}`` (deduped), and a failed/nameless lookup leaves the row's
+        existing fallback name untouched so resolution never blocks the metrics.
+        """
+        distinct_ids = {row.campaign_id for row in rows if row.campaign_id}
+        names = {
+            campaign_id: self._fetch_campaign_name(api_key, campaign_id)
+            for campaign_id in distinct_ids
+        }
+        return [self._row_with_campaign_name(row, names) for row in rows]
+
+    def _row_with_campaign_name(
+        self, row: CampaignMetrics, names: dict[str, str | None]
+    ) -> CampaignMetrics:
+        """Return ``row`` with its resolved ``campaign_name`` filled in (or unchanged)."""
+        resolved_name = names.get(row.campaign_id)
+        if resolved_name is None:
+            return row
+        return replace(row, campaign_name=resolved_name)
+
+    def _fetch_campaign_name(self, api_key: str, campaign_id: str) -> str | None:
+        """Return a campaign's name from ``GET /api/campaigns/{id}``, or None.
+
+        A non-alphanumeric id, a failed lookup, or a missing name all yield ``None`` so name
+        resolution never blocks the metrics (mirrors ``_fetch_message_name``).
+        """
+        if not _RESOURCE_ID_PATTERN.match(campaign_id):
+            return None
+        path = f"{_CAMPAIGNS_PATH}/{quote(campaign_id, safe='')}"
+        try:
+            body = self._client.get(api_key, path)
+        except KlaviyoServiceError:
+            log.info("klaviyo.campaign.lookup_failed", campaign_id=campaign_id)
+            return None
+        data = body.get("data")
+        attributes = data.get("attributes") if isinstance(data, dict) else None
+        name = attributes.get("name") if isinstance(attributes, dict) else None
+        return _opt_str(name)
 
     # -- Flow shaping ---------------------------------------------------------
 

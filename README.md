@@ -325,7 +325,7 @@ today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
 | Tool | REST route | Key inputs | Key output fields |
 |---|---|---|---|
 | `klaviyo_list_accounts` | `GET /v1/accounts` | — | `accounts[]{name, label}` |
-| `klaviyo_get_campaign_performance` | `POST /v1/campaigns/performance` | `start_date`+`end_date` **or** `timeframe`, `campaign?` | `campaigns[]{campaign_id, campaign_name, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `campaign_count` |
+| `klaviyo_get_campaign_performance` | `POST /v1/campaigns/performance` | `start_date`+`end_date` **or** `timeframe`, `campaign?`, `resolve_campaign_names?` | `campaigns[]{campaign_id, campaign_name, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `campaign_count` |
 | `klaviyo_get_flows` | `GET /v1/flows` | `status?`, `archived?` | `flows[]{flow_id, name, status, trigger_type, archived, created, updated}`, `flow_count` |
 | `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`+`end_date` **or** `timeframe`, `flow?`, `resolve_message_names?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
 | `klaviyo_get_flow_structure` | `GET /v1/flows/<flow_id>/structure` | `flow_id` (required), `account?` | `flow_id`, `action_count`, `steps[]{action_id, action_type, message_id, message_name, channel}`, `summary{action_type: count}` |
@@ -377,8 +377,20 @@ Per-campaign email performance for one account over an absolute date range.
 | `end_date` | string | No† | Inclusive end date, `YYYY-MM-DD` |
 | `timeframe` | string | No† | Named relative window (see [Timeframe presets](#timeframe-presets)) as an alternative to `start_date`+`end_date` |
 | `campaign` | string | No | Klaviyo campaign id — filters results to one campaign |
+| `resolve_campaign_names` | boolean | No | When `true`, resolve each `campaign_id` to its human-readable campaign name (default `false`) |
 
 † Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
+
+**`resolve_campaign_names` details:**
+
+The Campaign Values Report groups results by `campaign_id` and send channel, not
+by name, so by default `campaign_name` falls back to the send channel (`email` /
+`sms`). When `resolve_campaign_names` is `true`, each distinct `campaign_id` is
+looked up once via `GET /api/campaigns/{id}` (deduped) and the real campaign name
+is attached. A failed or missing lookup leaves the channel fallback in place and
+never blocks the metrics. This mirrors `resolve_message_names` on
+`klaviyo_get_flow_performance`; the lookups use the `campaigns:read` scope this
+tool already requires.
 
 **Output:**
 
@@ -952,6 +964,10 @@ continues rather than aborting. See `live_smoke.py` for details.
   prior window defaults to the equal-length window immediately before it (overridable via
   `prior_start_date`/`prior_end_date`). An optional `entity_id` trends a single campaign/flow.
   See [`klaviyo_compare_periods`](#klaviyo_compare_periods)
+- `resolve_campaign_names` option on `klaviyo_get_campaign_performance` (default `false`): resolve
+  each `campaign_id` to its real campaign name via `GET /api/campaigns/{id}` (deduped), the
+  campaign-side counterpart to `resolve_message_names` — without it `campaign_name` falls back to
+  the send channel because the values report groups by id and channel, not name
 
 **Deferred to later work packages:**
 

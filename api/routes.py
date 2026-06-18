@@ -105,6 +105,7 @@ def campaign_performance() -> tuple[Response, int]:
             body.get("end_date"),
             body.get("campaign"),
             timeframe=body.get("timeframe"),
+            resolve_campaign_names=bool(body.get("resolve_campaign_names", False)),
         )
     )
 

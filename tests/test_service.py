@@ -378,3 +378,77 @@ class TestDateValidation:
 
         # Should not raise
         service.get_campaign_performance("acme", "2025-01-15", "2025-01-15")
+
+
+# ---------------------------------------------------------------------------
+# resolve_campaign_names
+# ---------------------------------------------------------------------------
+
+
+def _channel_row(campaign_id: str, channel: str = "email") -> dict:
+    """A campaign row whose groupings carry only the send channel (no campaign_name)."""
+    return {
+        "groupings": {"campaign_id": campaign_id, "send_channel": channel},
+        "statistics": {
+            "recipients": 100,
+            "delivered": 100,
+            "opens_unique": 0,
+            "clicks_unique": 0,
+            "bounced": 0,
+            "unsubscribes": 0,
+            "conversions": 0,
+            "conversion_value": 0.0,
+        },
+    }
+
+
+def _campaign_detail(name: str) -> dict:
+    return {"data": {"type": "campaign", "attributes": {"name": name}}}
+
+
+class TestResolveCampaignNames:
+    def test_default_does_not_resolve_and_falls_back_to_channel(self, mock_client):
+        mock_client.post.return_value = _klaviyo_report_body([_channel_row("C1", "email")])
+        service = _make_service(mock_client)
+
+        response = service.get_campaign_performance("acme", "2025-01-01", "2025-01-31")
+
+        assert response.data["campaigns"][0]["campaign_name"] == "email"
+        mock_client.get.assert_not_called()
+
+    def test_resolve_attaches_real_name(self, mock_client):
+        mock_client.post.return_value = _klaviyo_report_body([_channel_row("C1", "email")])
+        mock_client.get.return_value = _campaign_detail("Spring Sale")
+        service = _make_service(mock_client)
+
+        response = service.get_campaign_performance(
+            "acme", "2025-01-01", "2025-01-31", resolve_campaign_names=True
+        )
+
+        assert response.data["campaigns"][0]["campaign_name"] == "Spring Sale"
+
+    def test_resolve_dedupes_lookups_by_id(self, mock_client):
+        mock_client.post.return_value = _klaviyo_report_body(
+            [_channel_row("C1", "email"), _channel_row("C1", "sms")]
+        )
+        mock_client.get.return_value = _campaign_detail("Spring Sale")
+        service = _make_service(mock_client)
+
+        service.get_campaign_performance(
+            "acme", "2025-01-01", "2025-01-31", resolve_campaign_names=True
+        )
+
+        # Both rows share campaign_id C1, so the campaign is fetched exactly once.
+        assert mock_client.get.call_count == 1
+
+    def test_failed_lookup_keeps_fallback(self, mock_client):
+        mock_client.post.return_value = _klaviyo_report_body([_channel_row("C1", "email")])
+        mock_client.get.side_effect = KlaviyoServiceError("NOT_FOUND", "missing", http_status=404)
+        service = _make_service(mock_client)
+
+        response = service.get_campaign_performance(
+            "acme", "2025-01-01", "2025-01-31", resolve_campaign_names=True
+        )
+
+        # Lookup failed -> the send-channel fallback is retained, metrics still returned.
+        assert response.data["campaigns"][0]["campaign_name"] == "email"

@@ -101,7 +101,7 @@ class TestCallToolHappyPaths:
             )
 
         mock_service.get_campaign_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", None, timeframe=None
+            "acme", "2025-01-01", "2025-01-31", None, timeframe=None, resolve_campaign_names=False
         )
         payload = json.loads(result[0].text)
         assert "data" in payload
@@ -125,6 +125,25 @@ class TestCallToolHappyPaths:
         _, kwargs_positional = mock_service.get_campaign_performance.call_args
         args = mock_service.get_campaign_performance.call_args[0]
         assert "CAMP001" in args
+
+    def test_resolve_campaign_names_forwarded(self, mock_service, campaign_response):
+        mock_service.get_campaign_performance.return_value = campaign_response
+
+        with _inject_service(mock_service):
+            _run(
+                server.call_tool(
+                    "klaviyo_get_campaign_performance",
+                    {
+                        "account": "acme",
+                        "timeframe": "last_30_days",
+                        "resolve_campaign_names": True,
+                    },
+                )
+            )
+
+        assert (
+            mock_service.get_campaign_performance.call_args.kwargs["resolve_campaign_names"] is True
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +194,7 @@ class TestCallToolErrors:
             )
 
         mock_service.get_campaign_performance.assert_called_once_with(
-            "acme", None, None, None, timeframe=None
+            "acme", None, None, None, timeframe=None, resolve_campaign_names=False
         )
 
     def test_uninitialized_service_returns_error(self):

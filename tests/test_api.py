@@ -193,7 +193,7 @@ class TestCampaignPerformanceEndpoint:
         )
 
         mock_service.get_campaign_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", None, timeframe=None
+            "acme", "2025-01-01", "2025-01-31", None, timeframe=None, resolve_campaign_names=False
         )
 
     def test_timeframe_forwarded(self, client, mock_service, campaign_response):
@@ -206,7 +206,22 @@ class TestCampaignPerformanceEndpoint:
         )
 
         mock_service.get_campaign_performance.assert_called_once_with(
-            "acme", None, None, None, timeframe="last_30_days"
+            "acme", None, None, None, timeframe="last_30_days", resolve_campaign_names=False
+        )
+
+    def test_resolve_campaign_names_forwarded(self, client, mock_service, campaign_response):
+        mock_service.get_campaign_performance.return_value = campaign_response
+
+        client.post(
+            "/v1/campaigns/performance",
+            headers={**_auth_headers(), "Content-Type": "application/json"},
+            data=json.dumps(
+                {"account": "acme", "timeframe": "last_30_days", "resolve_campaign_names": True}
+            ),
+        )
+
+        assert (
+            mock_service.get_campaign_performance.call_args.kwargs["resolve_campaign_names"] is True
         )
 
     def test_optional_campaign_filter_forwarded(self, client, mock_service, campaign_response):
@@ -240,7 +255,7 @@ class TestCampaignPerformanceEndpoint:
         )
 
         mock_service.get_campaign_performance.assert_called_once_with(
-            "acme", None, None, None, timeframe=None
+            "acme", None, None, None, timeframe=None, resolve_campaign_names=False
         )
 
     def test_non_json_body_returns_400(self, client, mock_service):
