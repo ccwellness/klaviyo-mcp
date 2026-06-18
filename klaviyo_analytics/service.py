@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
@@ -74,6 +74,24 @@ _SERIES_INTERVALS: frozenset[str] = frozenset({"hourly", "daily", "weekly", "mon
 # INVALID_ARGUMENT rather than a raw Klaviyo 4XX. 366 days admits a full leap-year window.
 _MAX_PERIOD_DAYS = 366
 
+# Named relative timeframes the caller may pass instead of explicit start/end dates. Trailing
+# windows (``last_N_days``) span N complete days ending *yesterday* so a partial current day
+# never skews the counts; calendar windows (``this_month``/``year_to_date``) run through today.
+# Every name here must be resolvable by ``_resolve_preset`` (a test enforces the pairing).
+_TIMEFRAME_PRESETS: frozenset[str] = frozenset(
+    {
+        "today",
+        "yesterday",
+        "last_7_days",
+        "last_30_days",
+        "last_90_days",
+        "last_365_days",
+        "this_month",
+        "last_month",
+        "year_to_date",
+    }
+)
+
 
 def _to_float(value: object) -> float:
     """Coerce a Klaviyo statistic value to float; non-numeric/None becomes 0.0 (CS-016)."""
@@ -99,6 +117,35 @@ def _is_absolute_date(token: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _today() -> date:
+    """Return the current local date. Indirected so tests can pin 'now' deterministically."""
+    return date.today()
+
+
+def _resolve_preset(preset: str, today: date) -> tuple[date, date]:
+    """Map a named timeframe to an inclusive ``(start, end)`` anchored to ``today``.
+
+    Built as a table so the resolver has a single return (and no per-name branching). Callers
+    must validate ``preset`` against ``_TIMEFRAME_PRESETS`` first; an unknown name raises
+    ``KeyError`` here, which the membership check upstream prevents.
+    """
+    yesterday = today - timedelta(days=1)
+    first_of_month = today.replace(day=1)
+    last_of_prev_month = first_of_month - timedelta(days=1)
+    windows: dict[str, tuple[date, date]] = {
+        "today": (today, today),
+        "yesterday": (yesterday, yesterday),
+        "last_7_days": (today - timedelta(days=7), yesterday),
+        "last_30_days": (today - timedelta(days=30), yesterday),
+        "last_90_days": (today - timedelta(days=90), yesterday),
+        "last_365_days": (today - timedelta(days=365), yesterday),
+        "this_month": (first_of_month, today),
+        "last_month": (last_of_prev_month.replace(day=1), last_of_prev_month),
+        "year_to_date": (today.replace(month=1, day=1), today),
+    }
+    return windows[preset]
 
 
 class KlaviyoService:
@@ -129,20 +176,24 @@ class KlaviyoService:
     def get_campaign_performance(
         self,
         account: str | None,
-        start_date: str,
-        end_date: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
         campaign: str | None = None,
+        *,
+        timeframe: str | None = None,
     ) -> ServiceResponse:
-        """Fetch per-campaign performance for an account over an absolute date range.
+        """Fetch per-campaign performance for an account over a date range.
 
         Resolves ``account`` to a credential, calls the Klaviyo Campaign Values Report with
         the account's conversion metric, computes open/click/bounce rates per
-        ``metrics.py``, and returns a ``ServiceResponse``. An optional ``campaign`` filters
-        the results to a single campaign id. The event-time vs. send-date ``time_basis`` is
-        recorded as a warning so the caller can interpret the counts correctly.
+        ``metrics.py``, and returns a ``ServiceResponse``. The window is given either as a
+        named ``timeframe`` preset or as an explicit ``start_date``/``end_date`` pair (see
+        ``_resolve_period``). An optional ``campaign`` filters the results to a single campaign
+        id. The event-time vs. send-date ``time_basis`` is recorded as a warning so the caller
+        can interpret the counts correctly.
         """
         resolved = self._registry.resolve(account)
-        period = self._validated_period(start_date, end_date)
+        period = self._resolve_period(timeframe, start_date, end_date)
         attributes = self._build_report_attributes(
             resolved, _CAMPAIGN_VALUES_TYPE, metrics.REPORT_STATISTICS, period
         )
@@ -193,21 +244,24 @@ class KlaviyoService:
         )
         return ServiceResponse(data=data, metadata=meta)
 
-    def get_flow_performance(
+    def get_flow_performance(  # noqa: PLR0913 — fixed public flow-performance surface (TRD §7)
         self,
         account: str | None,
-        start_date: str,
-        end_date: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
         flow: str | None = None,
         resolve_message_names: bool = False,
+        *,
+        timeframe: str | None = None,
     ) -> ServiceResponse:
         """Fetch per-(flow, message, channel) performance for an account over a date range.
 
-        Mirrors ``get_campaign_performance`` against the Flow Values Report: validates the
-        period, builds the report attributes with the account's conversion metric, computes
-        open/click/bounce rates per ``metrics.py``, and shapes the result rows into
-        ``FlowMetrics``. An optional ``flow`` filters to a single flow id. The event-time vs.
-        send-date ``time_basis`` is surfaced as a warning, as for campaigns.
+        Mirrors ``get_campaign_performance`` against the Flow Values Report: resolves the
+        period (named ``timeframe`` preset or explicit ``start_date``/``end_date``), builds the
+        report attributes with the account's conversion metric, computes open/click/bounce rates
+        per ``metrics.py``, and shapes the result rows into ``FlowMetrics``. An optional ``flow``
+        filters to a single flow id. The event-time vs. send-date ``time_basis`` is surfaced as
+        a warning, as for campaigns.
 
         When ``resolve_message_names`` is True, each distinct ``flow_message_id`` is looked up
         once via ``GET /api/flow-messages/{id}`` and its name attached to the matching rows; a
@@ -215,7 +269,7 @@ class KlaviyoService:
         metrics. The default (False) adds no extra calls and is byte-identical to before.
         """
         resolved = self._registry.resolve(account)
-        period = self._validated_period(start_date, end_date)
+        period = self._resolve_period(timeframe, start_date, end_date)
         attributes = self._build_report_attributes(
             resolved, _FLOW_VALUES_TYPE, metrics.REPORT_STATISTICS, period
         )
@@ -272,16 +326,19 @@ class KlaviyoService:
         self,
         account: str | None,
         entity: str,
-        start_date: str,
-        end_date: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
         interval: str = "weekly",
         entity_id: str | None = None,
         statistics: tuple[str, ...] | None = None,
+        *,
+        timeframe: str | None = None,
     ) -> ServiceResponse:
         """Fetch a bucketed over-time series for a flow.
 
         Validates ``entity`` (only ``flow`` — Klaviyo has no campaign-series endpoint) and
-        ``interval`` (one of the Klaviyo bucket sizes), posts to the matching series report,
+        ``interval`` (one of the Klaviyo bucket sizes), resolves the period (named ``timeframe``
+        preset or explicit ``start_date``/``end_date``), posts to the matching series report,
         and returns the report's top-level
         ``date_times`` alongside per-grouping statistic arrays. Klaviyo's statistic arrays are
         passed through verbatim (including any rate statistics) — they are positionally aligned
@@ -292,7 +349,7 @@ class KlaviyoService:
         resolved = self._registry.resolve(account)
         path, report_type = self._series_endpoint(entity)
         validated_interval = self._validated_interval(interval)
-        period = self._validated_period(start_date, end_date)
+        period = self._resolve_period(timeframe, start_date, end_date)
         requested = statistics if statistics is not None else metrics.SERIES_DEFAULT_STATISTICS
         attributes = self._build_report_attributes(
             resolved, report_type, requested, period, interval=validated_interval
@@ -315,6 +372,43 @@ class KlaviyoService:
         return ServiceResponse(data=data, metadata=meta)
 
     # -- Request building -----------------------------------------------------
+
+    def _resolve_period(
+        self,
+        timeframe: str | None,
+        start_date: str | None,
+        end_date: str | None,
+    ) -> ReportPeriod:
+        """Resolve the reporting window from either a named ``timeframe`` or explicit dates.
+
+        Exactly one of the two inputs is expected: a ``timeframe`` preset (resolved to absolute
+        dates anchored to today) or an explicit ``start_date``/``end_date`` pair. Supplying both
+        is rejected so the effective window is never ambiguous; supplying neither is rejected so
+        a missing date can't silently become an unbounded query.
+        """
+        if timeframe is not None:
+            if start_date is not None or end_date is not None:
+                raise KlaviyoServiceError(
+                    "INVALID_ARGUMENT",
+                    "provide either timeframe or start_date/end_date, not both",
+                    http_status=400,
+                )
+            if timeframe not in _TIMEFRAME_PRESETS:
+                allowed = ", ".join(sorted(_TIMEFRAME_PRESETS))
+                raise KlaviyoServiceError(
+                    "INVALID_ARGUMENT",
+                    f"timeframe {timeframe!r} is not one of: {allowed}",
+                    http_status=400,
+                )
+            start, end = _resolve_preset(timeframe, _today())
+            return ReportPeriod(start_date=start.isoformat(), end_date=end.isoformat())
+        if not start_date or not end_date:
+            raise KlaviyoServiceError(
+                "INVALID_ARGUMENT",
+                "start_date and end_date are required unless a timeframe preset is given",
+                http_status=400,
+            )
+        return self._validated_period(start_date, end_date)
 
     def _validated_period(self, start_date: str, end_date: str) -> ReportPeriod:
         """Validate absolute ISO dates with start <= end within a one-year span.

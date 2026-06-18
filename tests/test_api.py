@@ -193,7 +193,20 @@ class TestCampaignPerformanceEndpoint:
         )
 
         mock_service.get_campaign_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", None
+            "acme", "2025-01-01", "2025-01-31", None, timeframe=None
+        )
+
+    def test_timeframe_forwarded(self, client, mock_service, campaign_response):
+        mock_service.get_campaign_performance.return_value = campaign_response
+
+        client.post(
+            "/v1/campaigns/performance",
+            headers={**_auth_headers(), "Content-Type": "application/json"},
+            data=json.dumps({"account": "acme", "timeframe": "last_30_days"}),
+        )
+
+        mock_service.get_campaign_performance.assert_called_once_with(
+            "acme", None, None, None, timeframe="last_30_days"
         )
 
     def test_optional_campaign_filter_forwarded(self, client, mock_service, campaign_response):
@@ -215,27 +228,20 @@ class TestCampaignPerformanceEndpoint:
         args = mock_service.get_campaign_performance.call_args[0]
         assert "CAMP001" in args
 
-    def test_missing_start_date_returns_400(self, client, mock_service):
-        response = client.post(
+    def test_missing_dates_delegates_to_service(self, client, mock_service, campaign_response):
+        # The adapter no longer pre-validates the window; it forwards the (None) dates and the
+        # service owns the "timeframe or start/end is required" rule (see test_service_wp3).
+        mock_service.get_campaign_performance.return_value = campaign_response
+
+        client.post(
             "/v1/campaigns/performance",
             headers={**_auth_headers(), "Content-Type": "application/json"},
-            data=json.dumps({"account": "acme", "end_date": "2025-01-31"}),
+            data=json.dumps({"account": "acme"}),
         )
 
-        assert response.status_code == 400
-        body = json.loads(response.data)
-        assert body["error"]["code"] == "INVALID_ARGUMENT"
-
-    def test_missing_end_date_returns_400(self, client, mock_service):
-        response = client.post(
-            "/v1/campaigns/performance",
-            headers={**_auth_headers(), "Content-Type": "application/json"},
-            data=json.dumps({"account": "acme", "start_date": "2025-01-01"}),
+        mock_service.get_campaign_performance.assert_called_once_with(
+            "acme", None, None, None, timeframe=None
         )
-
-        assert response.status_code == 400
-        body = json.loads(response.data)
-        assert body["error"]["code"] == "INVALID_ARGUMENT"
 
     def test_non_json_body_returns_400(self, client, mock_service):
         response = client.post(

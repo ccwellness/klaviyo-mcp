@@ -109,22 +109,24 @@ class TestListToolsFive:
         names = {t.name for t in tools}
         assert names == self._EXPECTED
 
-    def test_flow_performance_requires_start_and_end_date(self, mock_service):
+    def test_flow_performance_offers_window_inputs(self, mock_service):
+        # Dates and timeframe are alternatives, so neither is schema-required; both are offered.
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
         flow_perf = next(t for t in tools if t.name == "klaviyo_get_flow_performance")
-        required = flow_perf.inputSchema.get("required", [])
-        assert "start_date" in required
-        assert "end_date" in required
+        props = flow_perf.inputSchema["properties"]
+        assert {"start_date", "end_date", "timeframe"} <= set(props)
+        assert flow_perf.inputSchema.get("required", []) == []
 
-    def test_performance_over_time_requires_entity_start_end(self, mock_service):
+    def test_performance_over_time_requires_only_entity(self, mock_service):
+        # entity stays required; the window is given by either dates or a timeframe preset.
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
         ot = next(t for t in tools if t.name == "klaviyo_get_performance_over_time")
         required = ot.inputSchema.get("required", [])
-        assert "entity" in required
-        assert "start_date" in required
-        assert "end_date" in required
+        props = ot.inputSchema["properties"]
+        assert required == ["entity"]
+        assert {"start_date", "end_date", "timeframe"} <= set(props)
 
     def test_get_flows_has_no_required_fields(self, mock_service):
         with _inject_service(mock_service):
@@ -254,31 +256,31 @@ class TestGetFlowPerformanceDispatch:
         args = mock_service.get_flow_performance.call_args[0]
         assert "FLOW001" in args
 
-    def test_missing_start_date_returns_invalid_argument(self, mock_service):
+    def test_missing_dates_delegates_to_service(self, mock_service):
+        # Adapter forwards (None) dates; the service owns the window-required rule.
+        mock_service.get_flow_performance.return_value = _flow_perf_response()
+
         with _inject_service(mock_service):
-            result = _run(
+            _run(server.call_tool("klaviyo_get_flow_performance", {"account": "acme"}))
+
+        mock_service.get_flow_performance.assert_called_once_with(
+            "acme", None, None, None, False, timeframe=None
+        )
+
+    def test_timeframe_forwarded(self, mock_service):
+        mock_service.get_flow_performance.return_value = _flow_perf_response()
+
+        with _inject_service(mock_service):
+            _run(
                 server.call_tool(
                     "klaviyo_get_flow_performance",
-                    {"end_date": "2025-01-31"},
+                    {"account": "acme", "timeframe": "last_7_days"},
                 )
             )
 
-        payload = json.loads(result[0].text)
-        assert payload["error"]["code"] == "INVALID_ARGUMENT"
-        mock_service.get_flow_performance.assert_not_called()
-
-    def test_missing_end_date_returns_invalid_argument(self, mock_service):
-        with _inject_service(mock_service):
-            result = _run(
-                server.call_tool(
-                    "klaviyo_get_flow_performance",
-                    {"start_date": "2025-01-01"},
-                )
-            )
-
-        payload = json.loads(result[0].text)
-        assert payload["error"]["code"] == "INVALID_ARGUMENT"
-        mock_service.get_flow_performance.assert_not_called()
+        mock_service.get_flow_performance.assert_called_once_with(
+            "acme", None, None, None, False, timeframe="last_7_days"
+        )
 
     def test_service_error_returned_as_envelope(self, mock_service):
         mock_service.get_flow_performance.side_effect = KlaviyoServiceError(
@@ -413,29 +415,36 @@ class TestGetPerformanceOverTimeDispatch:
         assert payload["error"]["code"] == "INVALID_ARGUMENT"
         mock_service.get_performance_over_time.assert_not_called()
 
-    def test_missing_start_date_returns_invalid_argument(self, mock_service):
+    def test_missing_dates_delegates_to_service(self, mock_service):
+        # entity stays adapter-required; the window (dates/timeframe) is the service's rule.
+        mock_service.get_performance_over_time.return_value = _over_time_response("flow")
+
         with _inject_service(mock_service):
-            result = _run(
+            _run(
                 server.call_tool(
                     "klaviyo_get_performance_over_time",
-                    {"entity": "flow", "end_date": "2025-01-31"},
+                    {"account": "acme", "entity": "flow"},
                 )
             )
 
-        payload = json.loads(result[0].text)
-        assert payload["error"]["code"] == "INVALID_ARGUMENT"
+        mock_service.get_performance_over_time.assert_called_once_with(
+            "acme", "flow", None, None, "weekly", None, None, timeframe=None
+        )
 
-    def test_missing_end_date_returns_invalid_argument(self, mock_service):
+    def test_timeframe_forwarded(self, mock_service):
+        mock_service.get_performance_over_time.return_value = _over_time_response("flow")
+
         with _inject_service(mock_service):
-            result = _run(
+            _run(
                 server.call_tool(
                     "klaviyo_get_performance_over_time",
-                    {"entity": "flow", "start_date": "2025-01-01"},
+                    {"account": "acme", "entity": "flow", "timeframe": "year_to_date"},
                 )
             )
 
-        payload = json.loads(result[0].text)
-        assert payload["error"]["code"] == "INVALID_ARGUMENT"
+        mock_service.get_performance_over_time.assert_called_once_with(
+            "acme", "flow", None, None, "weekly", None, None, timeframe="year_to_date"
+        )
 
     def test_service_error_returned_as_envelope(self, mock_service):
         mock_service.get_performance_over_time.side_effect = KlaviyoServiceError(

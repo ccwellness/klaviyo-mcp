@@ -74,9 +74,9 @@ clean JSON-RPC channel for the MCP transport.
 
 ## Install
 
-**Requires Python 3.11.** The lock file (`requirements.txt`) was generated under
-Python 3.14 — regenerate it on 3.11 before a production or shared release (see
-[Dev workflow](#dev-workflow)).
+**Requires Python 3.11.** The lock file (`requirements.txt`) is compiled and
+hash-pinned under Python 3.11; install it into a 3.11 virtual environment (see
+[Dev workflow](#dev-workflow) for how to regenerate it).
 
 ```bash
 # Clone and enter the repo
@@ -255,6 +255,13 @@ curl -X POST \
      -H "Content-Type: application/json" \
      -d '{"account": "acme", "entity": "flow", "start_date": "2025-01-01", "end_date": "2025-03-31", "interval": "weekly"}' \
      http://127.0.0.1:8080/v1/performance/over-time
+
+# Campaign performance using a timeframe preset instead of explicit dates
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "timeframe": "last_30_days"}' \
+     http://127.0.0.1:8080/v1/campaigns/performance
 ```
 
 ---
@@ -287,16 +294,42 @@ numbers reconcile with the Klaviyo dashboard. By contrast, the values reports
 (`klaviyo_get_campaign_performance` and `klaviyo_get_flow_performance`) compute
 open, click, and bounce rates locally from the raw count statistics.
 
+### Timeframe presets
+
+Every date-scoped tool (`klaviyo_get_campaign_performance`,
+`klaviyo_get_flow_performance`, `klaviyo_get_performance_over_time`) accepts the
+window as **either** an explicit `start_date`+`end_date` pair **or** a named
+`timeframe` preset — pass one or the other, never both. A preset resolves to
+absolute dates on the server (anchored to the current date), and the resolved
+window is echoed back in `metadata.period` so the exact dates queried are always
+visible.
+
+| Preset | Resolves to |
+|---|---|
+| `today` | the current date only |
+| `yesterday` | the previous date only |
+| `last_7_days` | the 7 complete days ending yesterday |
+| `last_30_days` | the 30 complete days ending yesterday |
+| `last_90_days` | the 90 complete days ending yesterday |
+| `last_365_days` | the 365 complete days ending yesterday |
+| `this_month` | the 1st of the current month through today |
+| `last_month` | the full previous calendar month |
+| `year_to_date` | January 1 of the current year through today |
+
+Trailing `last_N_days` windows end **yesterday** so a partial current day never
+skews the counts; the calendar windows (`this_month`, `year_to_date`) run through
+today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
+
 ### Tool summary
 
 | Tool | REST route | Key inputs | Key output fields |
 |---|---|---|---|
 | `klaviyo_list_accounts` | `GET /v1/accounts` | — | `accounts[]{name, label}` |
-| `klaviyo_get_campaign_performance` | `POST /v1/campaigns/performance` | `start_date`, `end_date`, `campaign?` | `campaigns[]{campaign_id, campaign_name, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `campaign_count` |
+| `klaviyo_get_campaign_performance` | `POST /v1/campaigns/performance` | `start_date`+`end_date` **or** `timeframe`, `campaign?` | `campaigns[]{campaign_id, campaign_name, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `campaign_count` |
 | `klaviyo_get_flows` | `GET /v1/flows` | `status?`, `archived?` | `flows[]{flow_id, name, status, trigger_type, archived, created, updated}`, `flow_count` |
-| `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`, `end_date`, `flow?`, `resolve_message_names?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
+| `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`+`end_date` **or** `timeframe`, `flow?`, `resolve_message_names?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
 | `klaviyo_get_flow_structure` | `GET /v1/flows/<flow_id>/structure` | `flow_id` (required), `account?` | `flow_id`, `action_count`, `steps[]{action_id, action_type, message_id, message_name, channel}`, `summary{action_type: count}` |
-| `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`, `end_date`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
+| `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`+`end_date` **or** `timeframe`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
 
 ---
 
@@ -339,9 +372,12 @@ Per-campaign email performance for one account over an absolute date range.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `account` | string | No* | Canonical account name (e.g. `acme`). Required when more than one account is configured. Omit to use the only configured account. |
-| `start_date` | string | Yes | Inclusive start date, `YYYY-MM-DD` |
-| `end_date` | string | Yes | Inclusive end date, `YYYY-MM-DD` |
+| `start_date` | string | No† | Inclusive start date, `YYYY-MM-DD` |
+| `end_date` | string | No† | Inclusive end date, `YYYY-MM-DD` |
+| `timeframe` | string | No† | Named relative window (see [Timeframe presets](#timeframe-presets)) as an alternative to `start_date`+`end_date` |
 | `campaign` | string | No | Klaviyo campaign id — filters results to one campaign |
+
+† Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
 
 **Output:**
 
@@ -446,10 +482,13 @@ channel (email or SMS).
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `account` | string | No* | Canonical account name. Required when more than one account is configured. |
-| `start_date` | string | Yes | Inclusive start date, `YYYY-MM-DD` |
-| `end_date` | string | Yes | Inclusive end date, `YYYY-MM-DD` |
+| `start_date` | string | No† | Inclusive start date, `YYYY-MM-DD` |
+| `end_date` | string | No† | Inclusive end date, `YYYY-MM-DD` |
+| `timeframe` | string | No† | Named relative window (see [Timeframe presets](#timeframe-presets)) as an alternative to `start_date`+`end_date` |
 | `flow` | string | No | Klaviyo flow id — filters results to one flow |
 | `resolve_message_names` | boolean | No | When `true`, resolve each `flow_message_id` to its human-readable message name (default `false`) |
+
+† Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
 
 The date range may not exceed 366 days (one year). Engagement and conversion
 statistics are attributed by event time; `sent` is anchored to the message send
@@ -651,11 +690,14 @@ note](#over-time-statistics-note) above.
 |---|---|---|---|
 | `account` | string | No* | Canonical account name. Required when more than one account is configured. |
 | `entity` | string | Yes | Must be `flow`. Klaviyo has no campaign time-series endpoint; use `klaviyo_get_campaign_performance` for campaign totals. |
-| `start_date` | string | Yes | Inclusive start date, `YYYY-MM-DD` |
-| `end_date` | string | Yes | Inclusive end date, `YYYY-MM-DD` |
+| `start_date` | string | No† | Inclusive start date, `YYYY-MM-DD` |
+| `end_date` | string | No† | Inclusive end date, `YYYY-MM-DD` |
+| `timeframe` | string | No† | Named relative window (see [Timeframe presets](#timeframe-presets)) as an alternative to `start_date`+`end_date` |
 | `interval` | string | No | Bucket size: `hourly`, `daily`, `weekly` (default), or `monthly` |
 | `entity_id` | string | No | Klaviyo flow id — narrows results to one flow |
 | `statistics` | array of strings | No | Statistic names to request; defaults to a volume + engagement + conversion subset |
+
+† Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
 
 The date range may not exceed 366 days. Passing an invalid `interval` or
 unsupported `entity` value returns an `INVALID_ARGUMENT` error.
@@ -732,6 +774,15 @@ pytest --cov --cov-report=term-missing
 
 Coverage gate: 80% line coverage on `klaviyo_analytics/`.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request to `main`. It
+installs the hash-pinned dependencies on Python 3.11 and runs the same gates as
+local dev: `ruff check`, `ruff format --check`, `mypy` on the business modules
+(`klaviyo_analytics server.py api`), and `pytest -m "not integration"` with the
+80% coverage gate. Live integration tests are excluded — they need real
+credentials.
+
 ### Updating dependencies
 
 The lock file (`requirements.txt`) is managed with pip-tools. To regenerate:
@@ -740,9 +791,9 @@ The lock file (`requirements.txt`) is managed with pip-tools. To regenerate:
 pip-compile --generate-hashes --output-file=requirements.txt requirements.in
 ```
 
-**Important:** The current `requirements.txt` was compiled under Python 3.14.
-The project targets Python 3.11. Regenerate the lock file on Python 3.11
-before any shared or production release to ensure hash correctness.
+**Important:** Always regenerate the lock file on Python 3.11 (the project's
+target). Compiling on a different minor version can pin version-specific or
+platform-specific wheels and produce hashes that fail `--require-hashes` on 3.11.
 
 ### Live connectivity check
 
@@ -788,6 +839,20 @@ continues rather than aborting. See `live_smoke.py` for details.
   and attached as `flow_message_name` per row — delivers the previously-deferred flow-message
   label resolution
 
+**WP-3 — done:**
+
+- Timeframe presets on all three date-scoped tools (`klaviyo_get_campaign_performance`,
+  `klaviyo_get_flow_performance`, `klaviyo_get_performance_over_time`): pass a named
+  `timeframe` (`today`, `yesterday`, `last_7_days`, `last_30_days`, `last_90_days`,
+  `last_365_days`, `this_month`, `last_month`, `year_to_date`) instead of explicit
+  `start_date`+`end_date`. Presets resolve to absolute dates on the server and the resolved
+  window is echoed in `metadata.period`. Trailing windows end yesterday to exclude the partial
+  current day; the service rejects supplying both forms or neither — see
+  [Timeframe presets](#timeframe-presets)
+- CI workflow (`.github/workflows/ci.yml`): ruff lint + format check, mypy on the business
+  modules, and the unit suite with the coverage gate, all on Python 3.11
+- Lock file recompiled and hash-pinned under Python 3.11 (the project target)
+
 **Deferred to later work packages:**
 
 - `get_list_health` — list growth and health metrics
@@ -795,13 +860,11 @@ continues rather than aborting. See `live_smoke.py` for details.
 - Response caching (NoOp → TTL cache)
 - Auto-chunking for date ranges exceeding one year
 - Metric-aggregates endpoint (event-time series for list growth / unsubscribes)
-- Timeframe presets (`last_30_days`, etc.)
 - Per-flow rollup
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials
 - Campaign trends over time (would require stitching campaign-values across sub-windows, as Klaviyo has no campaign-series endpoint)
 - Containerisation (`Dockerfile`, `docker-compose.yml`)
-- CI pipeline (GitHub Actions)
 
 ---
 

@@ -58,14 +58,16 @@ class TestListTools:
         names = {t.name for t in tools}
         assert names == _EXPECTED_TOOL_NAMES
 
-    def test_campaign_tool_requires_start_and_end_date(self, mock_service):
+    def test_campaign_tool_offers_window_inputs(self, mock_service):
+        # Dates and the timeframe preset are alternatives, so neither is schema-required; both
+        # must be advertised as inputs. The window-required rule is enforced in the service.
         with _inject_service(mock_service):
             tools = _run(server.list_tools())
 
         campaign_tool = next(t for t in tools if t.name == "klaviyo_get_campaign_performance")
-        required = campaign_tool.inputSchema.get("required", [])
-        assert "start_date" in required
-        assert "end_date" in required
+        props = campaign_tool.inputSchema["properties"]
+        assert {"start_date", "end_date", "timeframe"} <= set(props)
+        assert campaign_tool.inputSchema.get("required", []) == []
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ class TestCallToolHappyPaths:
             )
 
         mock_service.get_campaign_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", None
+            "acme", "2025-01-01", "2025-01-31", None, timeframe=None
         )
         payload = json.loads(result[0].text)
         assert "data" in payload
@@ -157,18 +159,23 @@ class TestCallToolErrors:
         payload = json.loads(result[0].text)
         assert "error" in payload
 
-    def test_missing_start_date_returns_invalid_argument(self, mock_service):
+    def test_missing_dates_delegates_to_service(self, mock_service, campaign_response):
+        # The handler no longer pre-validates the window; it forwards the (None) dates and the
+        # service raises INVALID_ARGUMENT when neither dates nor timeframe are given (covered in
+        # test_service_wp3). Here we assert the forwarding contract.
+        mock_service.get_campaign_performance.return_value = campaign_response
+
         with _inject_service(mock_service):
-            result = _run(
+            _run(
                 server.call_tool(
                     "klaviyo_get_campaign_performance",
-                    {"account": "acme", "end_date": "2025-01-31"},
+                    {"account": "acme"},
                 )
             )
 
-        payload = json.loads(result[0].text)
-        assert payload["error"]["code"] == "INVALID_ARGUMENT"
-        mock_service.get_campaign_performance.assert_not_called()
+        mock_service.get_campaign_performance.assert_called_once_with(
+            "acme", None, None, None, timeframe=None
+        )
 
     def test_uninitialized_service_returns_error(self):
         """get_service() raises INTERNAL_ERROR when _service is None."""

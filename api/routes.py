@@ -96,14 +96,15 @@ def list_accounts() -> tuple[Response, int]:
 
 @klaviyo_bp.post("/v1/campaigns/performance")
 def campaign_performance() -> tuple[Response, int]:
-    """Per-campaign performance for an account over an absolute date range."""
+    """Per-campaign performance for an account over a date range or timeframe preset."""
     body = _json_body()
     return _ok(
         _service().get_campaign_performance(
             body.get("account"),
-            _require(body.get("start_date"), "start_date"),
-            _require(body.get("end_date"), "end_date"),
+            body.get("start_date"),
+            body.get("end_date"),
             body.get("campaign"),
+            timeframe=body.get("timeframe"),
         )
     )
 
@@ -125,15 +126,16 @@ def flows() -> tuple[Response, int]:
 
 @klaviyo_bp.post("/v1/flows/performance")
 def flow_performance() -> tuple[Response, int]:
-    """Per-(flow, message, channel) performance for an account over an absolute date range."""
+    """Per-(flow, message, channel) performance for an account over a date range or preset."""
     body = _json_body()
     return _ok(
         _service().get_flow_performance(
             body.get("account"),
-            _require(body.get("start_date"), "start_date"),
-            _require(body.get("end_date"), "end_date"),
+            body.get("start_date"),
+            body.get("end_date"),
             body.get("flow"),
             bool(body.get("resolve_message_names", False)),
+            timeframe=body.get("timeframe"),
         )
     )
 
@@ -161,10 +163,11 @@ def performance_over_time() -> tuple[Response, int]:
         _service().get_performance_over_time(
             body.get("account"),
             _require(body.get("entity"), "entity"),
-            _require(body.get("start_date"), "start_date"),
-            _require(body.get("end_date"), "end_date"),
+            body.get("start_date"),
+            body.get("end_date"),
             body.get("interval", "weekly"),
             body.get("entity_id"),
             tuple(statistics) if isinstance(statistics, list) and statistics else None,
+            timeframe=body.get("timeframe"),
         )
     )

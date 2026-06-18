@@ -261,7 +261,20 @@ class TestFlowPerformanceEndpoint:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", None, False
+            "acme", "2025-01-01", "2025-01-31", None, False, timeframe=None
+        )
+
+    def test_timeframe_forwarded(self, client, mock_service):
+        mock_service.get_flow_performance.return_value = _flow_perf_response()
+
+        _json_post(
+            client,
+            "/v1/flows/performance",
+            {"account": "acme", "timeframe": "this_month"},
+        )
+
+        mock_service.get_flow_performance.assert_called_once_with(
+            "acme", None, None, None, False, timeframe="this_month"
         )
 
     def test_optional_flow_filter_forwarded(self, client, mock_service):
@@ -280,27 +293,15 @@ class TestFlowPerformanceEndpoint:
         args = mock_service.get_flow_performance.call_args[0]
         assert "FLOW001" in args
 
-    def test_missing_start_date_returns_400(self, client, mock_service):
-        response = _json_post(
-            client,
-            "/v1/flows/performance",
-            {"end_date": "2025-01-31"},
+    def test_missing_dates_delegates_to_service(self, client, mock_service):
+        # The adapter forwards (None) dates; the service owns the window-required rule.
+        mock_service.get_flow_performance.return_value = _flow_perf_response()
+
+        _json_post(client, "/v1/flows/performance", {"account": "acme"})
+
+        mock_service.get_flow_performance.assert_called_once_with(
+            "acme", None, None, None, False, timeframe=None
         )
-
-        assert response.status_code == 400
-        body = json.loads(response.data)
-        assert body["error"]["code"] == "INVALID_ARGUMENT"
-
-    def test_missing_end_date_returns_400(self, client, mock_service):
-        response = _json_post(
-            client,
-            "/v1/flows/performance",
-            {"start_date": "2025-01-01"},
-        )
-
-        assert response.status_code == 400
-        body = json.loads(response.data)
-        assert body["error"]["code"] == "INVALID_ARGUMENT"
 
     def test_non_json_body_returns_400(self, client, mock_service):
         response = client.post(
@@ -398,6 +399,20 @@ class TestPerformanceOverTimeEndpoint:
             "weekly",
             None,
             None,
+            timeframe=None,
+        )
+
+    def test_timeframe_forwarded(self, client, mock_service):
+        mock_service.get_performance_over_time.return_value = _over_time_response("flow")
+
+        _json_post(
+            client,
+            "/v1/performance/over-time",
+            {"account": "acme", "entity": "flow", "timeframe": "last_90_days"},
+        )
+
+        mock_service.get_performance_over_time.assert_called_once_with(
+            "acme", "flow", None, None, "weekly", None, None, timeframe="last_90_days"
         )
 
     def test_interval_forwarded(self, client, mock_service):
@@ -482,23 +497,15 @@ class TestPerformanceOverTimeEndpoint:
         body = json.loads(response.data)
         assert body["error"]["code"] == "INVALID_ARGUMENT"
 
-    def test_missing_start_date_returns_400(self, client, mock_service):
-        response = _json_post(
-            client,
-            "/v1/performance/over-time",
-            {"entity": "flow", "end_date": "2025-01-31"},
+    def test_missing_dates_delegates_to_service(self, client, mock_service):
+        # entity is still adapter-required; the window (dates/timeframe) is the service's rule.
+        mock_service.get_performance_over_time.return_value = _over_time_response("flow")
+
+        _json_post(client, "/v1/performance/over-time", {"account": "acme", "entity": "flow"})
+
+        mock_service.get_performance_over_time.assert_called_once_with(
+            "acme", "flow", None, None, "weekly", None, None, timeframe=None
         )
-
-        assert response.status_code == 400
-
-    def test_missing_end_date_returns_400(self, client, mock_service):
-        response = _json_post(
-            client,
-            "/v1/performance/over-time",
-            {"entity": "flow", "start_date": "2025-01-01"},
-        )
-
-        assert response.status_code == 400
 
     def test_missing_api_key_returns_401(self, client, mock_service):
         response = client.post(

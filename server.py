@@ -26,7 +26,7 @@ from klaviyo_analytics.errors import KlaviyoServiceError, map_exception
 from klaviyo_analytics.logging import configure_stderr_logging
 from klaviyo_analytics.registry import load_registry
 from klaviyo_analytics.schemas import ServiceResponse
-from klaviyo_analytics.service import KlaviyoService
+from klaviyo_analytics.service import _TIMEFRAME_PRESETS, KlaviyoService
 
 log = structlog.get_logger(__name__)
 
@@ -42,7 +42,16 @@ _ACCOUNT_DESC = (
     "Klaviyo account as a configured canonical name (e.g. 'acme'). Optional when exactly "
     "one account is configured; required when several are."
 )
-_DATE_DESC = "Inclusive boundary as an absolute ISO date (YYYY-MM-DD)."
+_DATE_DESC = (
+    "Inclusive boundary as an absolute ISO date (YYYY-MM-DD). Omit when passing 'timeframe'."
+)
+# Sorted once so the advertised enum is stable across calls.
+_TIMEFRAME_VALUES = sorted(_TIMEFRAME_PRESETS)
+_TIMEFRAME_DESC = (
+    "Named relative window as an alternative to start_date/end_date (e.g. 'last_30_days', "
+    "'this_month', 'year_to_date'). Trailing windows end yesterday; calendar windows run "
+    "through today. Pass either timeframe or start_date+end_date, not both."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -95,12 +104,13 @@ def handle_list_accounts(service: KlaviyoService, args: dict) -> ServiceResponse
 
 
 def handle_campaign_performance(service: KlaviyoService, args: dict) -> ServiceResponse:
-    """Fetch per-campaign performance for an account over an absolute date range."""
+    """Fetch per-campaign performance for an account over a date range or timeframe preset."""
     return service.get_campaign_performance(
         args.get("account"),
-        _require(args.get("start_date"), "start_date"),
-        _require(args.get("end_date"), "end_date"),
+        args.get("start_date"),
+        args.get("end_date"),
         args.get("campaign"),
+        timeframe=args.get("timeframe"),
     )
 
 
@@ -114,13 +124,14 @@ def handle_get_flows(service: KlaviyoService, args: dict) -> ServiceResponse:
 
 
 def handle_flow_performance(service: KlaviyoService, args: dict) -> ServiceResponse:
-    """Fetch per-flow performance for an account over an absolute date range."""
+    """Fetch per-flow performance for an account over a date range or timeframe preset."""
     return service.get_flow_performance(
         args.get("account"),
-        _require(args.get("start_date"), "start_date"),
-        _require(args.get("end_date"), "end_date"),
+        args.get("start_date"),
+        args.get("end_date"),
         args.get("flow"),
         bool(args.get("resolve_message_names", False)),
+        timeframe=args.get("timeframe"),
     )
 
 
@@ -138,11 +149,12 @@ def handle_performance_over_time(service: KlaviyoService, args: dict) -> Service
     return service.get_performance_over_time(
         args.get("account"),
         _require(args.get("entity"), "entity"),
-        _require(args.get("start_date"), "start_date"),
-        _require(args.get("end_date"), "end_date"),
+        args.get("start_date"),
+        args.get("end_date"),
         args.get("interval", "weekly"),
         args.get("entity_id"),
         tuple(statistics) if isinstance(statistics, list) and statistics else None,
+        timeframe=args.get("timeframe"),
     )
 
 
@@ -178,7 +190,8 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Per-campaign email performance for an account over a date range: sent, "
                 "delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, "
-                "unsubscribes, conversions, and conversion_value. Engagement/conversion "
+                "unsubscribes, conversions, and conversion_value. Specify the window with "
+                "either a 'timeframe' preset or start_date+end_date. Engagement/conversion "
                 "stats are attributed by event time; 'sent' is anchored to the send date "
                 "(see the time_basis note)."
             ),
@@ -188,12 +201,17 @@ async def list_tools() -> list[Tool]:
                     "account": {"type": "string", "description": _ACCOUNT_DESC},
                     "start_date": {"type": "string", "description": _DATE_DESC},
                     "end_date": {"type": "string", "description": _DATE_DESC},
+                    "timeframe": {
+                        "type": "string",
+                        "enum": _TIMEFRAME_VALUES,
+                        "description": _TIMEFRAME_DESC,
+                    },
                     "campaign": {
                         "type": "string",
                         "description": "Optional Klaviyo campaign id to filter to one campaign.",
                     },
                 },
-                "required": ["start_date", "end_date"],
+                "required": [],
             },
         ),
         Tool(
@@ -226,8 +244,9 @@ async def list_tools() -> list[Tool]:
                 "Per-(flow, message, channel) email/SMS performance for an account over a "
                 "date range: sent, delivered, opens, open_rate, clicks, click_rate, bounces, "
                 "bounce_rate, unsubscribes, conversions, and conversion_value, plus flow_id, "
-                "flow_message_id, and send_channel. Engagement/conversion stats are attributed "
-                "by event time; 'sent' is anchored to the send date (see the time_basis note)."
+                "flow_message_id, and send_channel. Specify the window with either a 'timeframe' "
+                "preset or start_date+end_date. Engagement/conversion stats are attributed by "
+                "event time; 'sent' is anchored to the send date (see the time_basis note)."
             ),
             inputSchema={
                 "type": "object",
@@ -235,6 +254,11 @@ async def list_tools() -> list[Tool]:
                     "account": {"type": "string", "description": _ACCOUNT_DESC},
                     "start_date": {"type": "string", "description": _DATE_DESC},
                     "end_date": {"type": "string", "description": _DATE_DESC},
+                    "timeframe": {
+                        "type": "string",
+                        "enum": _TIMEFRAME_VALUES,
+                        "description": _TIMEFRAME_DESC,
+                    },
                     "flow": {
                         "type": "string",
                         "description": "Optional Klaviyo flow id to filter to one flow.",
@@ -247,7 +271,7 @@ async def list_tools() -> list[Tool]:
                         ),
                     },
                 },
-                "required": ["start_date", "end_date"],
+                "required": [],
             },
         ),
         Tool(
@@ -276,7 +300,8 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Bucketed over-time series for a flow over a date range. Returns date_times "
                 "plus per-grouping statistic arrays positionally aligned to date_times. "
-                "interval is one of hourly, daily, weekly (default), or monthly. Optionally "
+                "interval is one of hourly, daily, weekly (default), or monthly. Specify the "
+                "window with either a 'timeframe' preset or start_date+end_date. Optionally "
                 "narrow to one flow id (entity_id) and override the default statistics. The "
                 "date range may not exceed one year. Note: Klaviyo has no campaign time-series "
                 "endpoint — use klaviyo_get_campaign_performance for campaign totals."
@@ -292,6 +317,11 @@ async def list_tools() -> list[Tool]:
                     },
                     "start_date": {"type": "string", "description": _DATE_DESC},
                     "end_date": {"type": "string", "description": _DATE_DESC},
+                    "timeframe": {
+                        "type": "string",
+                        "enum": _TIMEFRAME_VALUES,
+                        "description": _TIMEFRAME_DESC,
+                    },
                     "interval": {
                         "type": "string",
                         "enum": ["hourly", "daily", "weekly", "monthly"],
@@ -310,7 +340,7 @@ async def list_tools() -> list[Tool]:
                         ),
                     },
                 },
-                "required": ["entity", "start_date", "end_date"],
+                "required": ["entity"],
             },
         ),
     ]
