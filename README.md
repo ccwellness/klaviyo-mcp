@@ -343,6 +343,28 @@ Trailing `last_N_days` windows end **yesterday** so a partial current day never
 skews the counts; the calendar windows (`this_month`, `year_to_date`) run through
 today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
 
+### Long date ranges (auto-chunking)
+
+Klaviyo rejects a single report request wider than one calendar year. Rather than
+erroring, every date-scoped tool **auto-chunks** a longer range into consecutive
+sub-windows (each strictly under a calendar year, so leap years never push a chunk
+over the limit), fetches each, and merges:
+
+- **Performance totals** (`campaign_performance`, `flow_performance`,
+  `compare_periods`): each entity's counts are **summed** across chunks and its
+  rates rederived from the sums.
+- **Over-time series** (`get_performance_over_time`, `entity=flow`): the chunks'
+  `date_times` and per-flow statistic arrays are **concatenated** into one
+  continuous series. (`entity=campaign` is already bucket-stitched and bounded by
+  its 53-bucket cap.)
+- **List growth** (`get_list_growth`, `…_by_list`, `…_breakdown`): the
+  subscribe/unsubscribe event counts are **summed** across chunks.
+
+Each chunk is a separate rate-limited report call (paced ~1.1 s apart), so a long
+range is slower; the [response cache](#response-caching) makes repeats instant. The
+overall range is capped at ~5 years. When a range is chunked, the response
+`warnings` array says so.
+
 ### Tool summary
 
 | Tool | REST route | Key inputs | Key output fields |
@@ -530,7 +552,8 @@ channel (email or SMS).
 
 † Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
 
-The date range may not exceed 366 days (one year). Engagement and conversion
+Ranges longer than one year are auto-chunked (see [Long date ranges
+(auto-chunking)](#long-date-ranges-auto-chunking)). Engagement and conversion
 statistics are attributed by event time; `sent` is anchored to the message send
 date. See the `warnings` array in the response for the time-basis note.
 
@@ -747,8 +770,10 @@ The two entities are served differently:
 
 † Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
 
-The date range may not exceed 366 days. Passing an invalid `interval` or
-unsupported `entity` value returns an `INVALID_ARGUMENT` error.
+Ranges longer than one year are auto-chunked (see [Long date ranges
+(auto-chunking)](#long-date-ranges-auto-chunking)); for `flow` the chunks' series
+are concatenated, and for `campaign` the bucket cap still applies. Passing an
+invalid `interval` or unsupported `entity` returns an `INVALID_ARGUMENT` error.
 
 **Campaign trend rate-limit cost.** Each campaign bucket is a separate
 `campaign-values` report call, and those endpoints allow only ~1/sec and 2/min.
@@ -1281,9 +1306,17 @@ continues rather than aborting. See `live_smoke.py` for details.
   limit and capped at 53 buckets; the response cache makes repeats instant. See
   [`klaviyo_get_performance_over_time`](#klaviyo_get_performance_over_time)
 
+**WP-10 — done:**
+
+- Auto-chunking for date ranges over one year, across all date-scoped tools. A long range is
+  split into consecutive sub-windows (calendar-accurate, each strictly under a year), fetched per
+  chunk (paced), and merged: performance totals are summed (rates rederived), flow over-time
+  series are concatenated, and list-growth event counts are summed. Calls are paced and the
+  overall range capped at ~5 years; chunked responses carry a warning. See
+  [Long date ranges (auto-chunking)](#long-date-ranges-auto-chunking)
+
 **Deferred to later work packages:**
 
-- Auto-chunking for date ranges exceeding one year
 - Per-flow rollup
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials

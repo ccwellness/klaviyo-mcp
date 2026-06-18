@@ -835,66 +835,73 @@ class TestGetPerformanceOverTime:
 # ---------------------------------------------------------------------------
 
 
-class TestValidatedPeriodOneYearCap:
-    def test_366_days_is_valid_for_get_flow_performance(self, mock_client):
-        """A 366-day window (full leap-year span) must not raise."""
+class TestPeriodSpanChunking:
+    @pytest.fixture(autouse=True)
+    def _no_pacing(self, monkeypatch):
+        # Auto-chunking paces calls ~1.1 s apart; stub it so the chunked tests run instantly.
+        monkeypatch.setattr("klaviyo_analytics.service._sleep", lambda _s: None)
+
+    def test_within_one_year_single_request_flow(self, mock_client):
+        """A window strictly within one calendar year is one request (no chunking)."""
         service = _make_service(mock_client)
         mock_client.post.return_value = _flow_report_body([])
 
-        # 2024 is a leap year: 2024-01-01 to 2025-01-01 = 366 days
-        response = service.get_flow_performance("acme", "2024-01-01", "2025-01-01")
+        # 2024-01-01 .. 2024-12-31 stays under a calendar year.
+        response = service.get_flow_performance("acme", "2024-01-01", "2024-12-31")
 
         assert isinstance(response, ServiceResponse)
+        assert mock_client.post.call_count == 1
 
-    def test_367_days_raises_invalid_argument_for_get_flow_performance(self, mock_client):
-        """A 367-day window exceeds the 1-year maximum and must raise INVALID_ARGUMENT."""
+    def test_over_one_year_chunks_flow_performance(self, mock_client):
+        """A >1-year window is fetched in <=1-year chunks (more than one report call)."""
+        service = _make_service(mock_client)
+        mock_client.post.return_value = _flow_report_body([])
+
+        # 2024-01-01 .. 2025-06-01 (~516 days) -> 2 chunks.
+        response = service.get_flow_performance("acme", "2024-01-01", "2025-06-01")
+
+        assert isinstance(response, ServiceResponse)
+        assert mock_client.post.call_count == 2
+
+    def test_over_one_year_chunks_campaign_performance(self, mock_client):
+        service = _make_service(mock_client)
+        mock_client.post.return_value = {
+            "data": {"type": "campaign-values-report", "attributes": {"results": []}}
+        }
+
+        service.get_campaign_performance("acme", "2024-01-01", "2025-06-01")
+
+        assert mock_client.post.call_count == 2
+
+    def test_over_one_year_chunks_flow_series(self, mock_client):
+        service = _make_service(mock_client)
+        mock_client.post.return_value = _series_body([], [])
+
+        service.get_performance_over_time("acme", "flow", "2024-01-01", "2025-06-01")
+
+        assert mock_client.post.call_count == 2
+
+    def test_chunked_response_carries_chunk_warning(self, mock_client):
+        service = _make_service(mock_client)
+        mock_client.post.return_value = _flow_report_body([])
+
+        response = service.get_flow_performance("acme", "2024-01-01", "2025-06-01")
+
+        assert any("exceeds one year" in w for w in response.warnings)
+
+    def test_over_five_years_raises(self, mock_client):
         service = _make_service(mock_client)
 
         with pytest.raises(KlaviyoServiceError) as exc_info:
-            service.get_flow_performance("acme", "2024-01-01", "2025-01-02")
+            service.get_flow_performance("acme", "2020-01-01", "2026-06-01")
 
         assert exc_info.value.code == "INVALID_ARGUMENT"
         mock_client.post.assert_not_called()
 
-    def test_366_days_is_valid_for_get_campaign_performance(self, mock_client):
-        service = _make_service(mock_client)
-        from tests.test_service import _campaign_result, _klaviyo_report_body
-
-        mock_client.post.return_value = _klaviyo_report_body([_campaign_result()])
-
-        response = service.get_campaign_performance("acme", "2024-01-01", "2025-01-01")
-
-        assert isinstance(response, ServiceResponse)
-
-    def test_367_days_raises_invalid_argument_for_get_campaign_performance(self, mock_client):
+    def test_overall_cap_error_mentions_days(self, mock_client):
         service = _make_service(mock_client)
 
         with pytest.raises(KlaviyoServiceError) as exc_info:
-            service.get_campaign_performance("acme", "2024-01-01", "2025-01-02")
-
-        assert exc_info.value.code == "INVALID_ARGUMENT"
-
-    def test_366_days_is_valid_for_get_performance_over_time(self, mock_client):
-        service = _make_service(mock_client)
-        mock_client.post.return_value = _series_body([], [])
-
-        response = service.get_performance_over_time("acme", "flow", "2024-01-01", "2025-01-01")
-
-        assert isinstance(response, ServiceResponse)
-
-    def test_367_days_raises_invalid_argument_for_get_performance_over_time(self, mock_client):
-        service = _make_service(mock_client)
-
-        with pytest.raises(KlaviyoServiceError) as exc_info:
-            service.get_performance_over_time("acme", "flow", "2024-01-01", "2025-01-02")
-
-        assert exc_info.value.code == "INVALID_ARGUMENT"
-
-    def test_error_message_mentions_days(self, mock_client):
-        """The error message should indicate the span and maximum."""
-        service = _make_service(mock_client)
-
-        with pytest.raises(KlaviyoServiceError) as exc_info:
-            service.get_flow_performance("acme", "2023-01-01", "2025-01-01")
+            service.get_flow_performance("acme", "2018-01-01", "2026-01-01")
 
         assert "day" in exc_info.value.message.lower()

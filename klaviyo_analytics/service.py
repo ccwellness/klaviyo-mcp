@@ -14,7 +14,7 @@ import re
 import time
 from dataclasses import replace
 from datetime import date, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 from urllib.parse import quote
 
 import structlog
@@ -142,9 +142,22 @@ _CAMPAIGN_TREND_NOTE = (
     "fall in, so a one-time campaign appears as a spike rather than a continuous line."
 )
 
-# A reporting timeframe wider than this is rejected up front so the caller gets a clean
-# INVALID_ARGUMENT rather than a raw Klaviyo 4XX. 366 days admits a full leap-year window.
+# Nominal days in a year, used only to size the overall span cap below. The per-request 1-year
+# limit is enforced by calendar-accurate chunking (see ``_period_chunks`` / ``_one_year_cap``),
+# not this constant, so leap years never push a chunk over Klaviyo's limit.
 _MAX_PERIOD_DAYS = 366
+
+# Overall upper bound on a requested range. Chunking removes the per-request 1-year limit, but
+# each chunk is still a (rate-limited) report call, so the total span is capped to keep one call
+# from fanning out into dozens of chunks. ~5 years => at most 5-6 chunks.
+_MAX_TOTAL_PERIOD_DAYS = _MAX_PERIOD_DAYS * 5
+
+# Surfaced when a range exceeds one year and was auto-chunked across multiple report calls.
+_CHUNKED_NOTE = (
+    "The requested range exceeds one year, so it was fetched in <=1-year chunks and merged "
+    "(totals summed, series concatenated). This issues one or more extra rate-limited report "
+    "calls per chunk."
+)
 
 # Named relative timeframes the caller may pass instead of explicit start/end dates. Trailing
 # windows (``last_N_days``) span N complete days ending *yesterday* so a partial current day
@@ -235,6 +248,53 @@ def _month_end(day: date) -> date:
 def _sleep(seconds: float) -> None:  # pragma: no cover - thin wrapper, patched out in tests
     """Sleep for ``seconds`` (indirected so tests can stub the trend pacing to a no-op)."""
     time.sleep(seconds)
+
+
+def _grouping_key(groupings: dict) -> tuple:
+    """Return a stable, hashable key for a series grouping dict (order-independent)."""
+    return tuple(sorted((str(name), str(value)) for name, value in groupings.items()))
+
+
+class _SeriesIndex(NamedTuple):
+    """Indexed view of chunked series used to concatenate per-grouping statistic arrays."""
+
+    order: list[tuple]  # grouping keys in first-seen order
+    groupings: dict[tuple, dict]  # grouping key -> the original groupings dict
+    stat_names: list[str]  # union of statistic names across chunks (first-seen order)
+    chunk_maps: list[dict[tuple, dict[str, list]]]  # per chunk: grouping key -> statistics
+    lengths: list[int]  # per chunk: number of date_times (for zero-padding)
+
+
+def _one_year_cap(day: date) -> date:
+    """Return the last date strictly within one calendar year of ``day`` (anniversary minus a day).
+
+    Klaviyo rejects report timeframes wider than one *calendar* year, so a fixed day count is
+    fragile across leap boundaries; anchoring to ``day``'s next-year anniversary keeps every chunk
+    safely under a year. A Feb 29 anchor (no anniversary next year) falls back to Feb 28.
+    """
+    try:
+        anniversary = day.replace(year=day.year + 1)
+    except ValueError:  # Feb 29 -> the following year has no Feb 29
+        anniversary = day.replace(year=day.year + 1, month=3, day=1)
+    return anniversary - timedelta(days=1)
+
+
+def _period_chunks(period: ReportPeriod) -> list[ReportPeriod]:
+    """Split ``period`` into consecutive sub-periods each strictly within one calendar year.
+
+    A period already within a year returns a single chunk equal to itself, so the common path is
+    unchanged. Chunks are contiguous and inclusive: each starts the day after the previous ends,
+    and the last is clamped to ``period.end_date``.
+    """
+    start = date.fromisoformat(period.start_date)
+    end = date.fromisoformat(period.end_date)
+    chunks: list[ReportPeriod] = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(_one_year_cap(cursor), end)
+        chunks.append(ReportPeriod(start_date=cursor.isoformat(), end_date=chunk_end.isoformat()))
+        cursor = chunk_end + timedelta(days=1)
+    return chunks
 
 
 def _build_buckets(start: date, end: date, interval: str) -> list[tuple[date, date]]:
@@ -362,7 +422,8 @@ class KlaviyoService:
             revision=self._cfg.revision,
             latency_ms=latency_ms,
         )
-        return ServiceResponse(data=data, metadata=meta, warnings=(metrics.TIME_BASIS_NOTE,))
+        warnings = (metrics.TIME_BASIS_NOTE,) + self._chunk_warning(period)
+        return ServiceResponse(data=data, metadata=meta, warnings=warnings)
 
     # -- Flows ----------------------------------------------------------------
 
@@ -541,6 +602,7 @@ class KlaviyoService:
             warnings = (
                 f"These growth metrics were not found for this account and are null: {names}.",
             )
+        warnings = warnings + self._chunk_warning(period)
         meta = ResponseMeta(
             account=resolved.name,
             period=period,
@@ -581,13 +643,18 @@ class KlaviyoService:
         if metric_id is None:
             unresolved.append(metric_name)
             return None
-        attributes = self._metric_aggregate_body(metric_id, period)
-        try:
-            body = self._client.post(api_key, _METRIC_AGGREGATES_PATH, attributes)
-        except KlaviyoServiceError:
-            log.info("klaviyo.metric_aggregate.failed", metric=metric_name)
-            return None
-        return self._sum_aggregate_counts(body)
+        total = 0
+        for index, chunk in enumerate(_period_chunks(period)):
+            if index > 0:
+                _sleep(_TREND_PACING_SECONDS)
+            attributes = self._metric_aggregate_body(metric_id, chunk)
+            try:
+                body = self._client.post(api_key, _METRIC_AGGREGATES_PATH, attributes)
+            except KlaviyoServiceError:
+                log.info("klaviyo.metric_aggregate.failed", metric=metric_name)
+                return None
+            total += self._sum_aggregate_counts(body)
+        return total
 
     def _metric_aggregate_body(
         self, metric_id: str, period: ReportPeriod, *, by: list[str] | None = None
@@ -667,7 +734,7 @@ class KlaviyoService:
             account=resolved.name, period=period, revision=self._cfg.revision, latency_ms=None
         )
         return ServiceResponse(
-            data=data, metadata=meta, warnings=self._list_growth_warnings(unresolved)
+            data=data, metadata=meta, warnings=self._list_growth_warnings(unresolved, period)
         )
 
     def get_list_breakdown(
@@ -710,7 +777,7 @@ class KlaviyoService:
             account=resolved.name, period=period, revision=self._cfg.revision, latency_ms=None
         )
         return ServiceResponse(
-            data=data, metadata=meta, warnings=self._list_growth_warnings(unresolved)
+            data=data, metadata=meta, warnings=self._list_growth_warnings(unresolved, period)
         )
 
     def _list_growth_counts(
@@ -738,18 +805,27 @@ class KlaviyoService:
         period: ReportPeriod,
         unresolved: list[str],
     ) -> dict[str, int] | None:
-        """Sum a metric's count grouped by the ``List`` dimension; None if absent/failed."""
+        """Sum a metric's count grouped by the ``List`` dimension; None if absent/failed.
+
+        Auto-chunked over >1-year ranges: each chunk's per-list counts are summed together.
+        """
         metric_id = name_to_id.get(metric_name)
         if metric_id is None:
             unresolved.append(metric_name)
             return None
-        attributes = self._metric_aggregate_body(metric_id, period, by=[_GROWTH_LIST_DIMENSION])
-        try:
-            body = self._client.post(api_key, _METRIC_AGGREGATES_PATH, attributes)
-        except KlaviyoServiceError:
-            log.info("klaviyo.metric_aggregate.grouped_failed", metric=metric_name)
-            return None
-        return self._sum_grouped_counts(body)
+        merged: dict[str, int] = {}
+        for index, chunk in enumerate(_period_chunks(period)):
+            if index > 0:
+                _sleep(_TREND_PACING_SECONDS)
+            attributes = self._metric_aggregate_body(metric_id, chunk, by=[_GROWTH_LIST_DIMENSION])
+            try:
+                body = self._client.post(api_key, _METRIC_AGGREGATES_PATH, attributes)
+            except KlaviyoServiceError:
+                log.info("klaviyo.metric_aggregate.grouped_failed", metric=metric_name)
+                return None
+            for name, count in self._sum_grouped_counts(body).items():
+                merged[name] = merged.get(name, 0) + count
+        return merged
 
     def _sum_grouped_counts(self, body: dict) -> dict[str, int]:
         """Return ``{dimension value: summed count}`` from a grouped metric-aggregate response."""
@@ -810,13 +886,13 @@ class KlaviyoService:
             "net": _net_growth(total_sub, total_unsub),
         }
 
-    def _list_growth_warnings(self, unresolved: list[str]) -> tuple[str, ...]:
-        """Assemble the per-list growth warnings (event-count note + any unresolved metrics)."""
+    def _list_growth_warnings(self, unresolved: list[str], period: ReportPeriod) -> tuple[str, ...]:
+        """Per-list growth warnings: event-count note, any unresolved metrics, and chunk note."""
         warnings = [_LIST_GROWTH_NOTE]
         if unresolved:
             names = ", ".join(sorted(set(unresolved)))
             warnings.append(f"These growth metrics were not found for this account: {names}.")
-        return tuple(warnings)
+        return tuple(warnings) + self._chunk_warning(period)
 
     def get_flow_performance(  # noqa: PLR0913 — fixed public flow-performance surface (TRD §7)
         self,
@@ -857,7 +933,8 @@ class KlaviyoService:
             revision=self._cfg.revision,
             latency_ms=latency_ms,
         )
-        return ServiceResponse(data=data, metadata=meta, warnings=(metrics.TIME_BASIS_NOTE,))
+        warnings = (metrics.TIME_BASIS_NOTE,) + self._chunk_warning(period)
+        return ServiceResponse(data=data, metadata=meta, warnings=warnings)
 
     def get_flow_structure(self, account: str | None, flow_id: str) -> ServiceResponse:
         """Return a flow's ordered actions with resolved message names on send steps.
@@ -930,6 +1007,7 @@ class KlaviyoService:
                 resolved, period, validated_interval, entity_id, statistics
             )
             warnings = ()
+        warnings = warnings + self._chunk_warning(period)
 
         data = {
             "entity": entity,
@@ -953,7 +1031,38 @@ class KlaviyoService:
         entity_id: str | None,
         statistics: tuple[str, ...] | None,
     ) -> tuple[list, list[SeriesGroup], float]:
-        """Fetch the flow-series report and shape it into ``(date_times, series, latency_ms)``."""
+        """Flow-series ``(date_times, series, latency)``, auto-chunked over >1-year ranges.
+
+        A <=1-year period is a single report call (unchanged). A longer period is fetched in
+        <=1-year chunks (paced) and the chunks' bucketed series concatenated: ``date_times`` are
+        joined end to end, and each flow grouping's statistic arrays are concatenated across all
+        chunks, zero-padding any chunk in which that grouping or statistic is absent.
+        """
+        chunks = _period_chunks(period)
+        if len(chunks) == 1:
+            return self._flow_series_single(account, chunks[0], interval, entity_id, statistics)
+        per_chunk: list[tuple[list, list[SeriesGroup]]] = []
+        total_latency = 0.0
+        for index, chunk in enumerate(chunks):
+            if index > 0:
+                _sleep(_TREND_PACING_SECONDS)
+            date_times, series, latency = self._flow_series_single(
+                account, chunk, interval, entity_id, statistics
+            )
+            per_chunk.append((date_times, series))
+            total_latency += latency
+        date_times, series = self._merge_series_chunks(per_chunk)
+        return date_times, series, round(total_latency, 4)
+
+    def _flow_series_single(
+        self,
+        account: AccountConfig,
+        period: ReportPeriod,
+        interval: str,
+        entity_id: str | None,
+        statistics: tuple[str, ...] | None,
+    ) -> tuple[list, list[SeriesGroup], float]:
+        """One flow-series report call for a single <=1-year ``period``."""
         path, report_type = self._series_endpoint("flow")
         requested = statistics if statistics is not None else metrics.SERIES_DEFAULT_STATISTICS
         attributes = self._build_report_attributes(
@@ -962,6 +1071,64 @@ class KlaviyoService:
         body, latency_ms = self._timed_post(account.api_key, path, attributes)
         date_times, series = self._shape_series(body, "flow", entity_id)
         return date_times, series, latency_ms
+
+    def _merge_series_chunks(
+        self, per_chunk: list[tuple[list, list[SeriesGroup]]]
+    ) -> tuple[list, list[SeriesGroup]]:
+        """Concatenate chunked series into one, aligning each grouping across all chunks.
+
+        ``date_times`` are concatenated in order. The statistic names are the union seen across
+        chunks; every grouping's array for a stat is the concatenation, per chunk, of that chunk's
+        values (or zeros of the chunk's length when the grouping or statistic is absent there).
+        """
+        all_date_times: list = []
+        for date_times, _ in per_chunk:
+            all_date_times.extend(date_times)
+        index = self._index_series_chunks(per_chunk)
+        merged = [
+            SeriesGroup(
+                groupings=index.groupings[key],
+                statistics=self._concat_group_stats(key, index),
+            )
+            for key in index.order
+        ]
+        return all_date_times, merged
+
+    def _index_series_chunks(self, per_chunk: list[tuple[list, list[SeriesGroup]]]) -> _SeriesIndex:
+        """Index the chunks: grouping order, groupings, stat names, and per-chunk stat maps."""
+        stat_names: list[str] = []
+        groupings: dict[tuple, dict] = {}
+        order: list[tuple] = []
+        chunk_maps: list[dict[tuple, dict[str, list]]] = []
+        lengths: list[int] = []
+        for date_times, series in per_chunk:
+            lengths.append(len(date_times))
+            chunk_map: dict[tuple, dict[str, list]] = {}
+            for group in series:
+                key = _grouping_key(group.groupings)
+                if key not in groupings:
+                    groupings[key] = group.groupings
+                    order.append(key)
+                chunk_map[key] = group.statistics
+                for name in group.statistics:
+                    if name not in stat_names:
+                        stat_names.append(name)
+            chunk_maps.append(chunk_map)
+        return _SeriesIndex(order, groupings, stat_names, chunk_maps, lengths)
+
+    def _concat_group_stats(self, key: tuple, index: _SeriesIndex) -> dict[str, list]:
+        """Build one grouping's concatenated statistic arrays across all chunks (zero-padded)."""
+        statistics: dict[str, list] = {name: [] for name in index.stat_names}
+        for chunk_index, chunk_map in enumerate(index.chunk_maps):
+            chunk_stats = chunk_map.get(key, {})
+            length = index.lengths[chunk_index]
+            for name in index.stat_names:
+                values = chunk_stats.get(name)
+                if isinstance(values, list) and len(values) == length:
+                    statistics[name].extend(values)
+                else:
+                    statistics[name].extend([0.0] * length)
+        return statistics
 
     def _campaign_trend(
         self,
@@ -1123,7 +1290,8 @@ class KlaviyoService:
             revision=self._cfg.revision,
             latency_ms=round(cur_latency + pri_latency, 4),
         )
-        return ServiceResponse(data=data, metadata=meta, warnings=(metrics.TIME_BASIS_NOTE,))
+        warnings = (metrics.TIME_BASIS_NOTE,) + self._chunk_warning(current, prior)
+        return ServiceResponse(data=data, metadata=meta, warnings=warnings)
 
     def _validate_compare_entity(self, entity: str) -> None:
         """Raise INVALID_ARGUMENT unless ``entity`` is one of the comparable entities."""
@@ -1236,12 +1404,12 @@ class KlaviyoService:
         return self._validated_period(start_date, end_date)
 
     def _validated_period(self, start_date: str, end_date: str) -> ReportPeriod:
-        """Validate absolute ISO dates with start <= end within a one-year span.
+        """Validate absolute ISO dates with start <= end within the overall span cap.
 
-        Raises INVALID_ARGUMENT when either date is not an absolute ISO date, when the start
-        is after the end, or when the span exceeds ``_MAX_PERIOD_DAYS`` (Klaviyo rejects
-        timeframes wider than a year; catching it here yields a clean message instead of a raw
-        upstream 4XX).
+        Raises INVALID_ARGUMENT when either date is not an absolute ISO date, when the start is
+        after the end, or when the span exceeds ``_MAX_TOTAL_PERIOD_DAYS``. Ranges longer than one
+        year are permitted here and auto-chunked at fetch time (see ``_period_chunks``); only an
+        unreasonably wide range is rejected up front.
         """
         if not _is_absolute_date(start_date) or not _is_absolute_date(end_date):
             raise KlaviyoServiceError(
@@ -1256,13 +1424,21 @@ class KlaviyoService:
                 http_status=400,
             )
         span_days = (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days
-        if span_days > _MAX_PERIOD_DAYS:
+        if span_days > _MAX_TOTAL_PERIOD_DAYS:
+            years = _MAX_TOTAL_PERIOD_DAYS // _MAX_PERIOD_DAYS
             raise KlaviyoServiceError(
                 "INVALID_ARGUMENT",
-                f"date range spans {span_days} days; the maximum is {_MAX_PERIOD_DAYS} (1 year)",
+                f"date range spans {span_days} days; the maximum is {_MAX_TOTAL_PERIOD_DAYS} "
+                f"(~{years} years)",
                 http_status=400,
             )
         return ReportPeriod(start_date=start_date, end_date=end_date)
+
+    def _chunk_warning(self, *periods: ReportPeriod) -> tuple[str, ...]:
+        """Return the chunked-range note if any of ``periods`` was split into multiple chunks."""
+        if any(len(_period_chunks(period)) > 1 for period in periods):
+            return (_CHUNKED_NOTE,)
+        return ()
 
     def _validated_interval(self, interval: str) -> str:
         """Return ``interval`` when it is a supported bucket size, else raise INVALID_ARGUMENT."""
@@ -1376,30 +1552,146 @@ class KlaviyoService:
     def _fetch_campaign_metrics(
         self, account: AccountConfig, period: ReportPeriod, campaign: str | None
     ) -> tuple[list[CampaignMetrics], float]:
-        """Run the Campaign Values Report for ``period`` and return shaped rows + latency.
+        """Campaign Values rows + latency for ``period``, auto-chunked over >1-year ranges.
 
-        Extracted so both ``get_campaign_performance`` and ``compare_periods`` issue the exact
-        same report request and shaping for a period (DRY, CS-003).
+        A <=1-year period is a single request (unchanged). A longer period is fetched in
+        <=1-year chunks (paced) and merged by summing each campaign's counts and rederiving its
+        rates. Shared by ``get_campaign_performance`` and ``compare_periods``.
         """
+        chunks = _period_chunks(period)
+        if len(chunks) == 1:
+            return self._fetch_campaign_metrics_single(account, chunks[0], campaign)
+        per_chunk: list[list[CampaignMetrics]] = []
+        total_latency = 0.0
+        for index, chunk in enumerate(chunks):
+            if index > 0:
+                _sleep(_TREND_PACING_SECONDS)
+            rows, latency = self._fetch_campaign_metrics_single(account, chunk, campaign)
+            per_chunk.append(rows)
+            total_latency += latency
+        return self._merge_campaign_chunks(per_chunk), round(total_latency, 4)
+
+    def _fetch_campaign_metrics_single(
+        self, account: AccountConfig, period: ReportPeriod, campaign: str | None
+    ) -> tuple[list[CampaignMetrics], float]:
+        """One Campaign Values Report call for a single <=1-year ``period``."""
         attributes = self._build_report_attributes(
             account, _CAMPAIGN_VALUES_TYPE, metrics.REPORT_STATISTICS, period
         )
         body, latency_ms = self._timed_post(account.api_key, _CAMPAIGN_VALUES_PATH, attributes)
         return self._shape_results(body, campaign), latency_ms
 
+    def _merge_campaign_chunks(
+        self, per_chunk: list[list[CampaignMetrics]]
+    ) -> list[CampaignMetrics]:
+        """Sum each campaign's rows across chunks (first-seen order), rederiving rates."""
+        grouped: dict[str, list[CampaignMetrics]] = {}
+        order: list[str] = []
+        for rows in per_chunk:
+            for row in rows:
+                if row.campaign_id not in grouped:
+                    grouped[row.campaign_id] = []
+                    order.append(row.campaign_id)
+                grouped[row.campaign_id].append(row)
+        return [self._sum_campaign_metrics(grouped[campaign_id]) for campaign_id in order]
+
+    def _sum_campaign_metrics(self, rows: list[CampaignMetrics]) -> CampaignMetrics:
+        """Combine one campaign's per-chunk rows into a single summed ``CampaignMetrics``."""
+        sent = sum(row.sent for row in rows)
+        delivered = sum(row.delivered for row in rows)
+        opens = sum(row.opens for row in rows)
+        clicks = sum(row.clicks for row in rows)
+        bounces = sum(row.bounces for row in rows)
+        rates = metrics.build_rate_block(sent, delivered, opens, clicks, bounces)
+        return CampaignMetrics(
+            campaign_id=rows[0].campaign_id,
+            campaign_name=next((row.campaign_name for row in rows if row.campaign_name), None),
+            sent=sent,
+            delivered=delivered,
+            opens=opens,
+            open_rate=rates["open_rate"],
+            clicks=clicks,
+            click_rate=rates["click_rate"],
+            bounces=bounces,
+            bounce_rate=rates["bounce_rate"],
+            unsubscribes=sum(row.unsubscribes for row in rows),
+            conversions=sum(row.conversions for row in rows),
+            conversion_value=sum(row.conversion_value for row in rows),
+        )
+
     def _fetch_flow_metrics(
         self, account: AccountConfig, period: ReportPeriod, flow: str | None
     ) -> tuple[list[FlowMetrics], float]:
-        """Run the Flow Values Report for ``period`` and return shaped rows + latency.
+        """Flow Values rows + latency for ``period``, auto-chunked over >1-year ranges.
 
-        The flow counterpart of ``_fetch_campaign_metrics``; message-name resolution stays with
-        the caller so the comparison path adds no extra lookups.
+        The flow counterpart of ``_fetch_campaign_metrics``: a longer period is merged by summing
+        each (flow, message, channel) row's counts across chunks. Message-name resolution stays
+        with the caller so the comparison path adds no extra lookups.
         """
+        chunks = _period_chunks(period)
+        if len(chunks) == 1:
+            return self._fetch_flow_metrics_single(account, chunks[0], flow)
+        per_chunk: list[list[FlowMetrics]] = []
+        total_latency = 0.0
+        for index, chunk in enumerate(chunks):
+            if index > 0:
+                _sleep(_TREND_PACING_SECONDS)
+            rows, latency = self._fetch_flow_metrics_single(account, chunk, flow)
+            per_chunk.append(rows)
+            total_latency += latency
+        return self._merge_flow_chunks(per_chunk), round(total_latency, 4)
+
+    def _fetch_flow_metrics_single(
+        self, account: AccountConfig, period: ReportPeriod, flow: str | None
+    ) -> tuple[list[FlowMetrics], float]:
+        """One Flow Values Report call for a single <=1-year ``period``."""
         attributes = self._build_report_attributes(
             account, _FLOW_VALUES_TYPE, metrics.REPORT_STATISTICS, period
         )
         body, latency_ms = self._timed_post(account.api_key, _FLOW_VALUES_PATH, attributes)
         return self._shape_flow_results(body, flow), latency_ms
+
+    def _merge_flow_chunks(self, per_chunk: list[list[FlowMetrics]]) -> list[FlowMetrics]:
+        """Sum each (flow, message, channel) row across chunks (first-seen order)."""
+        grouped: dict[tuple, list[FlowMetrics]] = {}
+        order: list[tuple] = []
+        for rows in per_chunk:
+            for row in rows:
+                key = (row.flow_id, row.flow_message_id, row.send_channel)
+                if key not in grouped:
+                    grouped[key] = []
+                    order.append(key)
+                grouped[key].append(row)
+        return [self._sum_flow_metrics(grouped[key]) for key in order]
+
+    def _sum_flow_metrics(self, rows: list[FlowMetrics]) -> FlowMetrics:
+        """Combine one (flow, message, channel) row's per-chunk values into a summed row."""
+        sent = sum(row.sent for row in rows)
+        delivered = sum(row.delivered for row in rows)
+        opens = sum(row.opens for row in rows)
+        clicks = sum(row.clicks for row in rows)
+        bounces = sum(row.bounces for row in rows)
+        rates = metrics.build_rate_block(sent, delivered, opens, clicks, bounces)
+        first = rows[0]
+        return FlowMetrics(
+            flow_id=first.flow_id,
+            flow_message_id=first.flow_message_id,
+            send_channel=first.send_channel,
+            sent=sent,
+            delivered=delivered,
+            opens=opens,
+            open_rate=rates["open_rate"],
+            clicks=clicks,
+            click_rate=rates["click_rate"],
+            bounces=bounces,
+            bounce_rate=rates["bounce_rate"],
+            unsubscribes=sum(row.unsubscribes for row in rows),
+            conversions=sum(row.conversions for row in rows),
+            conversion_value=sum(row.conversion_value for row in rows),
+            flow_message_name=next(
+                (row.flow_message_name for row in rows if row.flow_message_name), None
+            ),
+        )
 
     # -- Response shaping -----------------------------------------------------
 
