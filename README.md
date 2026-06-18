@@ -278,6 +278,7 @@ The Klaviyo private key configured for each account must have these scopes:
 | `metrics:read` | All report tools |
 | `campaigns:read` | `klaviyo_get_campaign_performance`, `klaviyo_compare_periods` (entity `campaign`) |
 | `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_flow_structure`, `klaviyo_get_performance_over_time`, `klaviyo_compare_periods` (entity `flow`) |
+| `lists:read` | `klaviyo_get_list_health` |
 
 Report endpoints (`/api/campaign-values-reports`, `/api/flow-values-reports`,
 `/api/flow-series-reports`) are rate-limited by
@@ -331,6 +332,7 @@ today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
 | `klaviyo_get_flow_structure` | `GET /v1/flows/<flow_id>/structure` | `flow_id` (required), `account?` | `flow_id`, `action_count`, `steps[]{action_id, action_type, message_id, message_name, channel}`, `summary{action_type: count}` |
 | `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`+`end_date` **or** `timeframe`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
 | `klaviyo_compare_periods` | `POST /v1/performance/compare` | `entity` (`campaign`/`flow`), `start_date`+`end_date` **or** `timeframe`, `prior_start_date?`+`prior_end_date?`, `entity_id?` | `entity`, `current_period`, `prior_period`, `current_totals`, `prior_totals`, `deltas{metric:{absolute, pct_change}}`, `current_entity_count`, `prior_entity_count` |
+| `klaviyo_get_list_health` | `GET /v1/lists/health` | `list_id?` | `lists[]{list_id, name, opt_in_process, profile_count, created, updated}`, `list_count`, `total_profiles` |
 
 ---
 
@@ -846,6 +848,73 @@ curl -X POST \
 
 ---
 
+### `klaviyo_get_list_health`
+
+Per-list membership health for an account: each list's current `profile_count`,
+`opt_in_process` (single vs double opt-in), name, and `created`/`updated`
+timestamps, plus `list_count` and `total_profiles`. This is current-state
+inventory only — subscribe/unsubscribe **trends** over time are out of scope for
+this tool.
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `account` | string | No* | Canonical account name. Required when more than one account is configured. |
+| `list_id` | string | No | Klaviyo list id — return just this one list instead of all. |
+
+**Output:**
+
+```json
+{
+  "data": {
+    "lists": [
+      {
+        "list_id": "SrEULb",
+        "name": "New Email Subs",
+        "opt_in_process": "single_opt_in",
+        "profile_count": 24296,
+        "created": "2025-01-05T01:21:29+00:00",
+        "updated": "2026-06-18T00:00:00+00:00"
+      }
+    ],
+    "list_count": 13,
+    "total_profiles": 43730
+  },
+  "metadata": {
+    "account": "acme",
+    "period": null,
+    "revision": "2025-04-15",
+    "latency_ms": null
+  },
+  "warnings": [
+    "total_profiles is the sum of per-list profile_count values; a profile in several lists is counted once per list, so this is not a deduplicated audience size."
+  ]
+}
+```
+
+`profile_count` is only available on Klaviyo's single-list endpoint (the
+`/api/lists` collection rejects `additional-fields[list]=profile_count`), so the
+all-lists path **enumerates** lists and then fetches each list's count
+individually — one extra request per list. A per-list lookup failure leaves that
+list's `profile_count` as `null` rather than dropping the list or failing the
+call. `profile_count` is also `null` if Klaviyo omits it. Requires the
+`lists:read` scope.
+
+**REST equivalent:** `GET /v1/lists/health` (optional `list_id` query param).
+
+```bash
+# All lists with sizes
+curl -H "X-API-Key: your-rest-secret" \
+     "http://127.0.0.1:8080/v1/lists/health?account=acme"
+
+# A single list
+curl -H "X-API-Key: your-rest-secret" \
+     "http://127.0.0.1:8080/v1/lists/health?account=acme&list_id=SrEULb"
+```
+
+---
+
 ## Dev workflow
 
 ### Linting and type checking
@@ -969,9 +1038,19 @@ continues rather than aborting. See `live_smoke.py` for details.
   campaign-side counterpart to `resolve_message_names` — without it `campaign_name` falls back to
   the send channel because the values report groups by id and channel, not name
 
+**WP-5 — done:**
+
+- New MCP tool `klaviyo_get_list_health` and REST equivalent `GET /v1/lists/health` — per-list
+  current `profile_count`, `opt_in_process`, name, and timestamps, plus `list_count` and
+  `total_profiles`. Because Klaviyo exposes `profile_count` only on the single-list endpoint, the
+  all-lists path enumerates lists then fetches each count individually; a per-list failure leaves
+  that count `null` without dropping the list. See [`klaviyo_get_list_health`](#klaviyo_get_list_health)
+
 **Deferred to later work packages:**
 
-- `get_list_health` — list growth and health metrics
+- `get_list_growth` — list subscribe/unsubscribe trends over time (via metric-aggregates on the
+  "Subscribed to List" / "Unsubscribed from List" metrics); the growth counterpart to
+  `klaviyo_get_list_health`
 - Response caching (NoOp → TTL cache)
 - Auto-chunking for date ranges exceeding one year
 - Metric-aggregates endpoint (event-time series for list growth / unsubscribes)

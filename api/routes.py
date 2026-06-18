@@ -152,6 +152,20 @@ def flow_structure(flow_id: str) -> tuple[Response, int]:
     )
 
 
+# -- list health -------------------------------------------------------------
+
+
+@klaviyo_bp.get("/v1/lists/health")
+def list_health() -> tuple[Response, int]:
+    """Per-list current size and opt-in process (optional list_id filter)."""
+    return _ok(
+        _service().get_list_health(
+            request.args.get("account"),
+            request.args.get("list_id"),
+        )
+    )
+
+
 # -- over-time series --------------------------------------------------------
 
 

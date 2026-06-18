@@ -144,6 +144,14 @@ def handle_flow_structure(service: KlaviyoService, args: dict) -> ServiceRespons
     )
 
 
+def handle_list_health(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Return each list's current size and opt-in process."""
+    return service.get_list_health(
+        args.get("account"),
+        args.get("list_id"),
+    )
+
+
 def handle_performance_over_time(service: KlaviyoService, args: dict) -> ServiceResponse:
     """Fetch a bucketed over-time series for a flow."""
     statistics = args.get("statistics")
@@ -181,6 +189,7 @@ HANDLERS: dict[str, Handler] = {
     "klaviyo_get_flow_structure": handle_flow_structure,
     "klaviyo_get_performance_over_time": handle_performance_over_time,
     "klaviyo_compare_periods": handle_compare_periods,
+    "klaviyo_get_list_health": handle_list_health,
 }
 
 
@@ -415,6 +424,27 @@ async def list_tools() -> list[Tool]:
                     },
                 },
                 "required": ["entity"],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_list_health",
+            description=(
+                "List membership health for an account: each list's current profile_count, "
+                "opt_in_process (single vs double opt-in), name, and created/updated timestamps, "
+                "plus list_count and total_profiles. Pass an optional list_id to return just one "
+                "list. total_profiles sums the per-list counts and is not deduplicated across "
+                "lists. Does not include subscribe/unsubscribe trends."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": _ACCOUNT_DESC},
+                    "list_id": {
+                        "type": "string",
+                        "description": "Optional Klaviyo list id to return a single list's health.",
+                    },
+                },
+                "required": [],
             },
         ),
     ]

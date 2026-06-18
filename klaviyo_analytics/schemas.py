@@ -175,6 +175,35 @@ class FlowStep:
 
 
 @dataclass(frozen=True)
+class ListHealth:
+    """One list's identity and current-size health from ``GET /api/lists``.
+
+    ``profile_count`` is the list's current membership (requested via the
+    ``additional-fields[list]=profile_count`` parameter); it is ``None`` when Klaviyo does not
+    return it. ``opt_in_process`` is ``single_opt_in`` or ``double_opt_in`` — how members joined,
+    a key signal for deliverability/health.
+    """
+
+    list_id: str
+    name: str | None
+    opt_in_process: str | None
+    profile_count: int | None
+    created: str | None
+    updated: str | None
+
+    def to_dict(self) -> dict:
+        """Return a plain dict for JSON serialization on both interfaces."""
+        return {
+            "list_id": self.list_id,
+            "name": self.name,
+            "opt_in_process": self.opt_in_process,
+            "profile_count": self.profile_count,
+            "created": self.created,
+            "updated": self.updated,
+        }
+
+
+@dataclass(frozen=True)
 class SeriesGroup:
     """One over-time series row: its groupings plus statistic arrays aligned to date_times.
 

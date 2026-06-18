@@ -26,6 +26,7 @@ from klaviyo_analytics.schemas import (
     FlowMetrics,
     FlowStep,
     FlowSummary,
+    ListHealth,
     ReportPeriod,
     ResponseMeta,
     SeriesGroup,
@@ -46,6 +47,18 @@ _FLOW_SERIES_PATH = "/api/flow-series-reports"
 _FLOWS_PATH = "/api/flows"
 _FLOW_MESSAGES_PATH = "/api/flow-messages"
 _CAMPAIGNS_PATH = "/api/campaigns"
+_LISTS_PATH = "/api/lists"
+
+# Klaviyo returns a list's current membership only when this additional-field is requested
+# (kept pre-encoded so the bracketed key survives untouched through the client).
+_LIST_PROFILE_COUNT_QUERY = "additional-fields%5Blist%5D=profile_count"
+
+# Surfaced on list-health responses: list memberships overlap, so the per-list counts are not
+# a deduplicated audience total.
+_LIST_OVERLAP_NOTE = (
+    "total_profiles is the sum of per-list profile_count values; a profile in several lists is "
+    "counted once per list, so this is not a deduplicated audience size."
+)
 
 # Klaviyo resource ids are alphanumeric; this pattern gates any id interpolated into a path
 # (e.g. ``flow_id`` for the flow-structure endpoint) so no caller text can alter the URL.
@@ -270,6 +283,96 @@ class KlaviyoService:
             latency_ms=None,
         )
         return ServiceResponse(data=data, metadata=meta)
+
+    # -- List health ----------------------------------------------------------
+
+    def get_list_health(self, account: str | None, list_id: str | None = None) -> ServiceResponse:
+        """Return each list's current size and opt-in process (membership health).
+
+        ``profile_count`` is only available on Klaviyo's single-list endpoint (the ``/api/lists``
+        collection rejects ``additional-fields[list]=profile_count``), so with no ``list_id`` the
+        service enumerates lists via ``GET /api/lists`` and then fetches each list's full
+        attributes (including the count) one by one — a per-list failure degrades that row to a
+        ``None`` count without dropping the list or failing the call. With a ``list_id``
+        (validated as a Klaviyo id, since it is path-interpolated) only that list is fetched and
+        any error propagates. ``total_profiles`` sums the per-list counts and is not deduplicated
+        across overlapping lists (surfaced as a warning).
+        """
+        resolved = self._registry.resolve(account)
+        if list_id is not None:
+            validated = self._validated_resource_id(list_id, "list_id")
+            path = f"{_LISTS_PATH}/{quote(validated, safe='')}?{_LIST_PROFILE_COUNT_QUERY}"
+            body = self._client.get(resolved.api_key, path)
+            data = body.get("data")
+            rows = [self._shape_list_health(data)] if isinstance(data, dict) else []
+        else:
+            listing = self._client.get_paginated(resolved.api_key, _LISTS_PATH)
+            rows = [
+                self._list_health_with_count(resolved.api_key, row)
+                for row in listing
+                if isinstance(row, dict)
+            ]
+
+        present = [row for row in rows if row is not None]
+        total = sum(row.profile_count for row in present if row.profile_count is not None)
+        data = {
+            "lists": [row.to_dict() for row in present],
+            "list_count": len(present),
+            "total_profiles": total,
+        }
+        meta = ResponseMeta(
+            account=resolved.name,
+            period=None,
+            revision=self._cfg.revision,
+            latency_ms=None,
+        )
+        return ServiceResponse(data=data, metadata=meta, warnings=(_LIST_OVERLAP_NOTE,))
+
+    def _list_health_with_count(self, api_key: str, row: dict) -> ListHealth | None:
+        """Return a list's health enriched with its profile_count.
+
+        Tries the single-list endpoint (which carries the count); on any failure it falls back
+        to the enumeration row so the list is still reported, just with a ``None`` count rather
+        than being dropped.
+        """
+        fetched = self._fetch_list_health(api_key, row.get("id"))
+        return fetched if fetched is not None else self._shape_list_health(row)
+
+    def _fetch_list_health(self, api_key: str, list_id: object) -> ListHealth | None:
+        """Fetch one list's full attributes (with profile_count); None on a bad id or failure.
+
+        Used by the bulk path, so a single list's lookup failure never aborts the whole report
+        (mirrors the flow message-name resolution's graceful degradation).
+        """
+        if not isinstance(list_id, str) or not _RESOURCE_ID_PATTERN.match(list_id):
+            return None
+        path = f"{_LISTS_PATH}/{quote(list_id, safe='')}?{_LIST_PROFILE_COUNT_QUERY}"
+        try:
+            body = self._client.get(api_key, path)
+        except KlaviyoServiceError:
+            log.info("klaviyo.list.fetch_failed", list_id=list_id)
+            return None
+        data = body.get("data")
+        return self._shape_list_health(data) if isinstance(data, dict) else None
+
+    def _shape_list_health(self, row: dict) -> ListHealth | None:
+        """Build one ``ListHealth`` from a list resource object, or None without a list id."""
+        if not isinstance(row, dict):
+            return None
+        list_id = row.get("id")
+        if not isinstance(list_id, str) or not list_id:
+            return None
+        raw_attributes = row.get("attributes")
+        attributes: dict = raw_attributes if isinstance(raw_attributes, dict) else {}
+        profile_count = attributes.get("profile_count")
+        return ListHealth(
+            list_id=list_id,
+            name=_opt_str(attributes.get("name")),
+            opt_in_process=_opt_str(attributes.get("opt_in_process")),
+            profile_count=profile_count if isinstance(profile_count, int) else None,
+            created=_opt_str(attributes.get("created")),
+            updated=_opt_str(attributes.get("updated")),
+        )
 
     def get_flow_performance(  # noqa: PLR0913 — fixed public flow-performance surface (TRD §7)
         self,
