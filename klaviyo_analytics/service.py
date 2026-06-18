@@ -48,10 +48,26 @@ _FLOWS_PATH = "/api/flows"
 _FLOW_MESSAGES_PATH = "/api/flow-messages"
 _CAMPAIGNS_PATH = "/api/campaigns"
 _LISTS_PATH = "/api/lists"
+_METRICS_PATH = "/api/metrics"
+_METRIC_AGGREGATES_PATH = "/api/metric-aggregates"
+_METRIC_AGGREGATE_TYPE = "metric-aggregate"
 
 # Klaviyo returns a list's current membership only when this additional-field is requested
 # (kept pre-encoded so the bracketed key survives untouched through the client).
 _LIST_PROFILE_COUNT_QUERY = "additional-fields%5Blist%5D=profile_count"
+
+# List-growth categories -> the (subscribed, unsubscribed) Klaviyo system-metric names whose
+# event counts define net growth for that channel. These are standard Klaviyo metric names
+# (resolved to ids per account at call time); a name absent on an account yields a null count.
+_GROWTH_METRICS: dict[str, tuple[str, str]] = {
+    "list": ("Subscribed to List", "Unsubscribed from List"),
+    "email": ("Subscribed to Email Marketing", "Unsubscribed from Email Marketing"),
+    "sms": ("Subscribed to SMS Marketing", "Unsubscribed from SMS Marketing"),
+}
+
+# metric-aggregates buckets by interval; the growth tool sums all buckets for a period total, so
+# the bucket size is immaterial — "day" keeps each response small over the 366-day max window.
+_GROWTH_INTERVAL = "day"
 
 # Surfaced on list-health responses: list memberships overlap, so the per-list counts are not
 # a deduplicated audience total.
@@ -373,6 +389,143 @@ class KlaviyoService:
             created=_opt_str(attributes.get("created")),
             updated=_opt_str(attributes.get("updated")),
         )
+
+    # -- List growth ----------------------------------------------------------
+
+    def get_list_growth(
+        self,
+        account: str | None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        *,
+        timeframe: str | None = None,
+    ) -> ServiceResponse:
+        """Return subscribe/unsubscribe totals and net growth over a period.
+
+        The window is a ``timeframe`` preset or an explicit ``start_date``/``end_date`` pair (see
+        ``_resolve_period``). For each channel (``list``, ``email``, ``sms``) the subscribed and
+        unsubscribed Klaviyo system metrics are resolved to ids by name, their event counts summed
+        over the window via ``POST /api/metric-aggregates``, and ``net = subscribed - unsubscribed``
+        computed. A metric name absent on the account (or a failed aggregate) yields a ``None``
+        count for that side — and ``net`` ``None`` — with the unresolved names surfaced as a
+        warning. Counts are event totals, not deduplicated profiles.
+        """
+        resolved = self._registry.resolve(account)
+        period = self._resolve_period(timeframe, start_date, end_date)
+        name_to_id = self._discover_metric_ids(resolved.api_key)
+
+        started = time.perf_counter()
+        unresolved: list[str] = []
+        growth: dict[str, dict] = {}
+        for category, (sub_name, unsub_name) in _GROWTH_METRICS.items():
+            subscribed = self._metric_total(
+                resolved.api_key, name_to_id, sub_name, period, unresolved
+            )
+            unsubscribed = self._metric_total(
+                resolved.api_key, name_to_id, unsub_name, period, unresolved
+            )
+            net = (
+                subscribed - unsubscribed
+                if subscribed is not None and unsubscribed is not None
+                else None
+            )
+            growth[category] = {
+                "subscribed": subscribed,
+                "unsubscribed": unsubscribed,
+                "net": net,
+            }
+        latency_ms = (time.perf_counter() - started) * 1000
+
+        warnings: tuple[str, ...] = ()
+        if unresolved:
+            names = ", ".join(sorted(set(unresolved)))
+            warnings = (
+                f"These growth metrics were not found for this account and are null: {names}.",
+            )
+        meta = ResponseMeta(
+            account=resolved.name,
+            period=period,
+            revision=self._cfg.revision,
+            latency_ms=round(latency_ms, 4),
+        )
+        return ServiceResponse(data={"growth": growth}, metadata=meta, warnings=warnings)
+
+    def _discover_metric_ids(self, api_key: str) -> dict[str, str]:
+        """Return a ``{metric name: id}`` map from ``GET /api/metrics`` (first id per name wins)."""
+        rows = self._client.get_paginated(api_key, _METRICS_PATH)
+        mapping: dict[str, str] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            metric_id = row.get("id")
+            raw_attributes = row.get("attributes")
+            attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
+            name = attributes.get("name")
+            if isinstance(metric_id, str) and isinstance(name, str) and name:
+                mapping.setdefault(name, metric_id)
+        return mapping
+
+    def _metric_total(
+        self,
+        api_key: str,
+        name_to_id: dict[str, str],
+        metric_name: str,
+        period: ReportPeriod,
+        unresolved: list[str],
+    ) -> int | None:
+        """Sum a metric's event count over ``period``; None (recording ``metric_name``) if absent.
+
+        A name not present on the account is appended to ``unresolved`` and returns None; a failed
+        aggregate call also returns None (logged) so one channel never breaks the whole response.
+        """
+        metric_id = name_to_id.get(metric_name)
+        if metric_id is None:
+            unresolved.append(metric_name)
+            return None
+        attributes = self._metric_aggregate_body(metric_id, period)
+        try:
+            body = self._client.post(api_key, _METRIC_AGGREGATES_PATH, attributes)
+        except KlaviyoServiceError:
+            log.info("klaviyo.metric_aggregate.failed", metric=metric_name)
+            return None
+        return self._sum_aggregate_counts(body)
+
+    def _metric_aggregate_body(self, metric_id: str, period: ReportPeriod) -> dict:
+        """Build a metric-aggregate request summing ``count`` across the period (end inclusive)."""
+        end_exclusive = (date.fromisoformat(period.end_date) + timedelta(days=1)).isoformat()
+        return {
+            "data": {
+                "type": _METRIC_AGGREGATE_TYPE,
+                "attributes": {
+                    "metric_id": metric_id,
+                    "measurements": ["count"],
+                    "interval": _GROWTH_INTERVAL,
+                    "filter": [
+                        f"greater-or-equal(datetime,{period.start_date}T00:00:00)",
+                        f"less-than(datetime,{end_exclusive}T00:00:00)",
+                    ],
+                    "timezone": "UTC",
+                },
+            }
+        }
+
+    def _sum_aggregate_counts(self, body: dict) -> int:
+        """Sum every bucket of the ``count`` measurement across a metric-aggregate response."""
+        data = body.get("data")
+        attributes = data.get("attributes") if isinstance(data, dict) else None
+        rows = attributes.get("data") if isinstance(attributes, dict) else None
+        total = 0.0
+        if isinstance(rows, list):
+            for row in rows:
+                measurements = row.get("measurements") if isinstance(row, dict) else None
+                counts = measurements.get("count") if isinstance(measurements, dict) else None
+                if isinstance(counts, list):
+                    total += sum(
+                        value
+                        for value in counts
+                        if isinstance(value, int | float) and not isinstance(value, bool)
+                    )
+        return int(total)
 
     def get_flow_performance(  # noqa: PLR0913 — fixed public flow-performance surface (TRD §7)
         self,

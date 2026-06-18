@@ -152,6 +152,16 @@ def handle_list_health(service: KlaviyoService, args: dict) -> ServiceResponse:
     )
 
 
+def handle_list_growth(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Return subscribe/unsubscribe totals and net growth over a date range or preset."""
+    return service.get_list_growth(
+        args.get("account"),
+        args.get("start_date"),
+        args.get("end_date"),
+        timeframe=args.get("timeframe"),
+    )
+
+
 def handle_performance_over_time(service: KlaviyoService, args: dict) -> ServiceResponse:
     """Fetch a bucketed over-time series for a flow."""
     statistics = args.get("statistics")
@@ -190,6 +200,7 @@ HANDLERS: dict[str, Handler] = {
     "klaviyo_get_performance_over_time": handle_performance_over_time,
     "klaviyo_compare_periods": handle_compare_periods,
     "klaviyo_get_list_health": handle_list_health,
+    "klaviyo_get_list_growth": handle_list_growth,
 }
 
 
@@ -442,6 +453,32 @@ async def list_tools() -> list[Tool]:
                     "list_id": {
                         "type": "string",
                         "description": "Optional Klaviyo list id to return a single list's health.",
+                    },
+                },
+                "required": [],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_list_growth",
+            description=(
+                "Subscribe/unsubscribe totals and net growth over a date range, per channel "
+                "(list, email, sms). For each channel returns subscribed, unsubscribed, and net "
+                "(subscribed - unsubscribed) event counts, summed over the window from Klaviyo's "
+                "system metrics. Specify the window with either a 'timeframe' preset or "
+                "start_date+end_date. Counts are events, not deduplicated profiles; a metric "
+                "absent on the account is null (see warnings). For current list sizes use "
+                "klaviyo_get_list_health."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {"type": "string", "description": _ACCOUNT_DESC},
+                    "start_date": {"type": "string", "description": _DATE_DESC},
+                    "end_date": {"type": "string", "description": _DATE_DESC},
+                    "timeframe": {
+                        "type": "string",
+                        "enum": _TIMEFRAME_VALUES,
+                        "description": _TIMEFRAME_DESC,
                     },
                 },
                 "required": [],

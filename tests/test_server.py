@@ -43,6 +43,7 @@ _EXPECTED_TOOL_NAMES = {
     "klaviyo_get_performance_over_time",
     "klaviyo_compare_periods",
     "klaviyo_get_list_health",
+    "klaviyo_get_list_growth",
 }
 
 

@@ -275,7 +275,7 @@ The Klaviyo private key configured for each account must have these scopes:
 | Scope | Used by |
 |---|---|
 | `accounts:read` | All tools (account resolution) |
-| `metrics:read` | All report tools |
+| `metrics:read` | All report tools; `klaviyo_get_list_growth` (metric discovery + metric-aggregates) |
 | `campaigns:read` | `klaviyo_get_campaign_performance`, `klaviyo_compare_periods` (entity `campaign`) |
 | `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_flow_structure`, `klaviyo_get_performance_over_time`, `klaviyo_compare_periods` (entity `flow`) |
 | `lists:read` | `klaviyo_get_list_health` |
@@ -333,6 +333,7 @@ today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
 | `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`+`end_date` **or** `timeframe`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
 | `klaviyo_compare_periods` | `POST /v1/performance/compare` | `entity` (`campaign`/`flow`), `start_date`+`end_date` **or** `timeframe`, `prior_start_date?`+`prior_end_date?`, `entity_id?` | `entity`, `current_period`, `prior_period`, `current_totals`, `prior_totals`, `deltas{metric:{absolute, pct_change}}`, `current_entity_count`, `prior_entity_count` |
 | `klaviyo_get_list_health` | `GET /v1/lists/health` | `list_id?` | `lists[]{list_id, name, opt_in_process, profile_count, created, updated}`, `list_count`, `total_profiles` |
+| `klaviyo_get_list_growth` | `POST /v1/lists/growth` | `start_date`+`end_date` **or** `timeframe` | `growth{list, email, sms}{subscribed, unsubscribed, net}` |
 
 ---
 
@@ -915,6 +916,69 @@ curl -H "X-API-Key: your-rest-secret" \
 
 ---
 
+### `klaviyo_get_list_growth`
+
+Subscribe/unsubscribe **totals and net growth** over a period, per channel
+(`list`, `email`, `sms`). This is the growth counterpart to
+`klaviyo_get_list_health` (which is current-state sizes). For each channel it
+sums the subscribed and unsubscribed Klaviyo system-metric event counts over the
+window and returns `net = subscribed - unsubscribed`.
+
+**Inputs:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `account` | string | No* | Canonical account name. Required when more than one account is configured. |
+| `start_date` | string | No† | Inclusive start date, `YYYY-MM-DD` |
+| `end_date` | string | No† | Inclusive end date, `YYYY-MM-DD` |
+| `timeframe` | string | No† | Named relative window (see [Timeframe presets](#timeframe-presets)) as an alternative to `start_date`+`end_date` |
+
+† Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
+
+**Output:**
+
+```json
+{
+  "data": {
+    "growth": {
+      "list":  {"subscribed": 4630, "unsubscribed": 51,  "net": 4579},
+      "email": {"subscribed": 2952, "unsubscribed": 327, "net": 2625},
+      "sms":   {"subscribed": 1395, "unsubscribed": 538, "net": 857}
+    }
+  },
+  "metadata": {
+    "account": "acme",
+    "period": {"start_date": "2025-05-19", "end_date": "2025-06-17"},
+    "revision": "2025-04-15",
+    "latency_ms": 642.0
+  },
+  "warnings": []
+}
+```
+
+Each channel maps to two Klaviyo system metrics, resolved to ids by name at call
+time (`Subscribed to List` / `Unsubscribed from List`, the `… Email Marketing`
+pair, and the `… SMS Marketing` pair). Counts are **event totals**, not
+deduplicated profiles — a profile that subscribes twice counts twice, and these
+do not reconcile to `profile_count` deltas. A metric name absent on the account
+(e.g. an account with no SMS) yields `null` for that side, `net` `null`, and a
+warning naming the unresolved metrics; a failed aggregate call degrades the same
+way rather than failing the response. The tool issues one metric-aggregates call
+per metric (up to six), all under the `metrics:read` scope.
+
+**REST equivalent:** `POST /v1/lists/growth` with a JSON body containing the same
+fields.
+
+```bash
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "timeframe": "last_30_days"}' \
+     http://127.0.0.1:8080/v1/lists/growth
+```
+
+---
+
 ## Dev workflow
 
 ### Linting and type checking
@@ -1046,12 +1110,19 @@ continues rather than aborting. See `live_smoke.py` for details.
   all-lists path enumerates lists then fetches each count individually; a per-list failure leaves
   that count `null` without dropping the list. See [`klaviyo_get_list_health`](#klaviyo_get_list_health)
 
+**WP-6 — done:**
+
+- New MCP tool `klaviyo_get_list_growth` and REST equivalent `POST /v1/lists/growth` — per-channel
+  (list, email, sms) subscribed/unsubscribed totals and net growth over a `timeframe` or explicit
+  date range. Klaviyo system metrics are resolved to ids by name and summed via
+  `POST /api/metric-aggregates`; an absent metric yields a null count with a warning. This also
+  lands the previously-deferred metric-aggregates integration. The growth counterpart to
+  `klaviyo_get_list_health`. See [`klaviyo_get_list_growth`](#klaviyo_get_list_growth)
+
 **Deferred to later work packages:**
 
-- `get_list_growth` — list subscribe/unsubscribe trends over time (via metric-aggregates on the
-  "Subscribed to List" / "Unsubscribed from List" metrics); the growth counterpart to
-  `klaviyo_get_list_health`
 - Response caching (NoOp → TTL cache)
+- Per-list growth breakdown (subscribes/unsubscribes grouped by individual list)
 - Auto-chunking for date ranges exceeding one year
 - Metric-aggregates endpoint (event-time series for list growth / unsubscribes)
 - Per-flow rollup

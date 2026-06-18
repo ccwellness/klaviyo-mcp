@@ -166,6 +166,20 @@ def list_health() -> tuple[Response, int]:
     )
 
 
+@klaviyo_bp.post("/v1/lists/growth")
+def list_growth() -> tuple[Response, int]:
+    """Subscribe/unsubscribe totals and net growth over a date range or timeframe preset."""
+    body = _json_body()
+    return _ok(
+        _service().get_list_growth(
+            body.get("account"),
+            body.get("start_date"),
+            body.get("end_date"),
+            timeframe=body.get("timeframe"),
+        )
+    )
+
+
 # -- over-time series --------------------------------------------------------
 
 
