@@ -47,29 +47,62 @@ def _build_service(cfg: Config) -> KlaviyoService:
     return KlaviyoService(client, registry, cfg)
 
 
+def _valid_tokens(cfg: Config) -> tuple[str, ...]:
+    """Return every accepted REST credential: ``rest_api_key`` plus any ``rest_api_tokens``."""
+    return tuple(token for token in (cfg.rest_api_key, *cfg.rest_api_tokens) if token)
+
+
+def _presented_credential() -> str | None:
+    """Extract the caller's credential from ``Authorization: Bearer`` or ``X-API-Key``.
+
+    Bearer is preferred (standard token auth); the legacy ``X-API-Key`` header is still accepted
+    for backward compatibility. Returns None when neither is present/non-empty.
+    """
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() == "bearer" and token.strip():
+        return token.strip()
+    return request.headers.get("X-API-Key") or None
+
+
+def _credential_matches(provided: str, valid_tokens: tuple[str, ...]) -> bool:
+    """Constant-time membership test of ``provided`` against the accepted tokens (NFR-S3).
+
+    Every candidate is compared (no early exit) so neither which token matched nor whether one
+    matched leaks through timing.
+    """
+    matched = False
+    for token in valid_tokens:
+        if hmac.compare_digest(provided, token):
+            matched = True
+    return matched
+
+
 def _register_auth_hook(app: Flask, cfg: Config) -> None:
-    """Install the constant-time ``X-API-Key`` before_request hook (NFR-S3)."""
-    # create_app runs validate_config(cfg, require_rest=True) before this hook is installed,
-    # so rest_api_key is guaranteed non-empty. Trust that invariant rather than falling back
-    # to "" — an empty string must never become the compare target.
-    expected_key = cfg.rest_api_key
-    assert expected_key, "rest_api_key must be validated non-empty before auth hook install"
+    """Install the constant-time bearer/``X-API-Key`` before_request hook (NFR-S3)."""
+    # create_app runs validate_config(cfg, require_rest=True) before this hook is installed, so at
+    # least one credential is guaranteed configured. Trust that invariant rather than allowing an
+    # empty token set (which would make compare_digest match nothing or, worse, an empty string).
+    valid_tokens = _valid_tokens(cfg)
+    assert valid_tokens, "a REST credential must be validated present before auth hook install"
 
     @app.before_request
     def _require_api_key() -> None:
-        """Bind a request_id, then enforce the API key for every non-exempt path."""
+        """Bind a request_id, then enforce a valid credential for every non-exempt path."""
         structlog.contextvars.bind_contextvars(request_id=uuid.uuid4().hex)
         if request.path in _EXEMPT_PATHS:
             return
-        provided = request.headers.get("X-API-Key")
+        provided = _presented_credential()
         if not provided:
             raise KlaviyoServiceError(
-                "MISSING_API_KEY", "X-API-Key header is required", http_status=401
+                "MISSING_API_KEY",
+                "an Authorization: Bearer token or X-API-Key header is required",
+                http_status=401,
             )
-        # Constant-time compare so a wrong key cannot be discovered by timing (NFR-S3). The
-        # expected key is never echoed back to the caller (NFR-S4).
-        if not hmac.compare_digest(provided, expected_key):
-            raise KlaviyoServiceError("INVALID_API_KEY", "Invalid API key", http_status=403)
+        # Constant-time compare so a wrong token cannot be discovered by timing (NFR-S3); the
+        # accepted tokens are never echoed back to the caller (NFR-S4).
+        if not _credential_matches(provided, valid_tokens):
+            raise KlaviyoServiceError("INVALID_API_KEY", "Invalid API credential", http_status=403)
 
     @app.teardown_request
     def _clear_context(_exc: BaseException | None) -> None:

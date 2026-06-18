@@ -78,6 +78,19 @@ class TestLoadConfig:
         with pytest.raises(KlaviyoServiceError):
             load_config({"CACHE_TTL_SECONDS": "soon"})
 
+    def test_rest_api_tokens_default_empty(self):
+        assert load_config({}).rest_api_tokens == ()
+
+    def test_rest_api_tokens_parsed_csv(self):
+        cfg = load_config({"REST_API_TOKENS": "tok-a, tok-b ,tok-c"})
+
+        assert cfg.rest_api_tokens == ("tok-a", "tok-b", "tok-c")
+
+    def test_rest_api_tokens_drops_blanks(self):
+        cfg = load_config({"REST_API_TOKENS": "tok-a,, ,tok-b,"})
+
+        assert cfg.rest_api_tokens == ("tok-a", "tok-b")
+
     def test_max_retries_invalid_raises_config_error(self):
         with pytest.raises(KlaviyoServiceError) as exc_info:
             load_config({"KLAVIYO_MAX_RETRIES": "abc"})
@@ -179,6 +192,14 @@ class TestValidateConfig:
     def test_require_rest_with_key_passes(self, fake_cfg):
         # rest_api_key is set in fake_cfg, so require_rest=True must not raise
         validate_config(fake_cfg, require_rest=True)
+
+    def test_require_rest_with_only_tokens_passes(self, fake_cfg):
+        from dataclasses import replace
+
+        # No rest_api_key, but a bearer token is configured -> the REST API may start.
+        cfg = replace(fake_cfg, rest_api_key=None, rest_api_tokens=("tok-a",))
+
+        validate_config(cfg, require_rest=True)
 
     def test_require_rest_false_missing_key_passes(self):
         cfg = Config(

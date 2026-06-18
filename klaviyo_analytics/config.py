@@ -48,6 +48,9 @@ class Config:
     # Response-cache TTL in seconds; 0 disables caching. Defaulted so existing constructions
     # (and tests) that omit it are unaffected.
     cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS
+    # Additional REST bearer tokens (beyond rest_api_key), so several clients can be issued and
+    # individually rotated/revoked. Defaulted empty so existing constructions are unaffected.
+    rest_api_tokens: tuple[str, ...] = ()
 
 
 def _get_int(env: Mapping[str, str], key: str, default: int) -> int:
@@ -63,6 +66,13 @@ def _get_int(env: Mapping[str, str], key: str, default: int) -> int:
             f"{key} must be an integer",
             http_status=500,
         ) from None
+
+
+def _parse_tokens(raw: str | None) -> tuple[str, ...]:
+    """Split a comma-separated token list into a tuple, dropping blanks/whitespace."""
+    if not raw:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
 def _resolve_accounts_file(env: Mapping[str, str]) -> Path | None:
@@ -99,6 +109,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         max_retries=_get_int(env, "KLAVIYO_MAX_RETRIES", _DEFAULT_MAX_RETRIES),
         accounts_file=_resolve_accounts_file(env),
         cache_ttl_seconds=_get_int(env, "CACHE_TTL_SECONDS", _DEFAULT_CACHE_TTL_SECONDS),
+        rest_api_tokens=_parse_tokens(env.get("REST_API_TOKENS")),
     )
 
 
@@ -121,10 +132,11 @@ def validate_config(cfg: Config, *, require_rest: bool = False) -> None:
         raise KlaviyoServiceError(
             "CONFIG_ERROR", "CACHE_TTL_SECONDS must not be negative", http_status=500
         )
-    if require_rest and not cfg.rest_api_key:
+    if require_rest and not (cfg.rest_api_key or cfg.rest_api_tokens):
         raise KlaviyoServiceError(
             "CONFIG_ERROR",
-            "REST_API_KEY environment variable is not set; REST API cannot start",
+            "no REST credential configured; set REST_API_KEY and/or REST_API_TOKENS "
+            "before starting the REST API",
             http_status=500,
         )
 

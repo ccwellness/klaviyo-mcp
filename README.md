@@ -51,7 +51,7 @@ Layer responsibilities:
 | Layer | File(s) | Owns |
 |---|---|---|
 | MCP adapter | `server.py` | JSON-RPC tool dispatch, `TextContent` rendering |
-| REST adapter | `api/__init__.py`, `api/routes.py` | Flask app factory, `X-API-Key` auth, route handlers |
+| REST adapter | `api/__init__.py`, `api/routes.py` | Flask app factory, bearer/`X-API-Key` auth, route handlers |
 | Service | `klaviyo_analytics/service.py` | Account resolution, request building, metric math |
 | Client | `klaviyo_analytics/client.py` | HTTP, auth headers, pagination, retry/backoff, response cache |
 | Cache | `klaviyo_analytics/cache.py` | In-memory TTL cache of successful responses (NoOp when disabled) |
@@ -241,9 +241,22 @@ exits immediately with a `CONFIG_ERROR`.
 
 ### Flask REST
 
-The REST adapter requires `REST_API_KEY` to be set — it refuses to start without
-it. Every request (except `GET /health`) must include an `X-API-Key` header
-matching that value.
+The REST adapter requires at least one credential — `REST_API_KEY` and/or
+`REST_API_TOKENS` — and refuses to start without one. Every request (except
+`GET /health`) must present a valid credential, either as a bearer token
+(preferred) or the legacy `X-API-Key` header:
+
+```
+Authorization: Bearer <token>
+X-API-Key: <token>          # equivalent, accepted for backward compatibility
+```
+
+A request authenticates if its token matches `REST_API_KEY` **or** any entry in
+`REST_API_TOKENS` (a comma-separated list). Configuring several tokens lets you
+issue one per client and **rotate or revoke** individually — drop a token from the
+list and it stops working, without disturbing the others. Tokens are compared in
+constant time and never echoed back. Missing credential → `401`; wrong credential
+→ `403`. This is token (bearer) auth, not a full OAuth2 authorization-server flow.
 
 ```bash
 # Development server (Windows/dev)
@@ -1397,8 +1410,16 @@ continues rather than aborting. See `live_smoke.py` for details.
   prints the MCP server config entry. Reuses `paths.py` and the registry loader; helpers are unit
   tested. See [Quick start: the installer](#quick-start-the-installer)
 
-**Deferred to later work packages:**
-- OAuth / token-based auth for the REST adapter
+**WP-14 — done:**
+
+- Token (bearer) auth for the REST adapter: requests authenticate via
+  `Authorization: Bearer <token>` (preferred) or the legacy `X-API-Key` header, matched
+  constant-time against `REST_API_KEY` plus a comma-separated `REST_API_TOKENS` list — so several
+  clients can be issued tokens and rotated/revoked individually. The adapter now starts with either
+  credential source. Full OAuth2 (an authorization-server / external IdP flow) remains out of
+  scope. See [Flask REST](#flask-rest)
+
+All planned work packages are complete; no items remain deferred.
 
 ---
 
@@ -1409,9 +1430,10 @@ The env var named in `accounts.toml` under `api_key_env` is not in the
 environment. Check that `.env` contains the variable and is being found (see
 [Configuration](#configuration)).
 
-**`CONFIG_ERROR: REST_API_KEY environment variable is not set`**
-The Flask REST adapter requires `REST_API_KEY` in `.env`. Set it to any random
-string (e.g. output of `python -c "import secrets; print(secrets.token_hex(32))"`).
+**`CONFIG_ERROR: no REST credential configured`**
+The Flask REST adapter requires `REST_API_KEY` and/or `REST_API_TOKENS` in `.env`.
+Set at least one to a random string (e.g. output of
+`python -c "import secrets; print(secrets.token_hex(32))"`).
 
 **`UNKNOWN_ACCOUNT: unknown account 'foo'`**
 The name passed to `account` does not match any entry in `accounts.toml`. The
@@ -1426,6 +1448,8 @@ Verify that `.mcp.json` points to the correct absolute path for `server.py` and
 that the `.venv` has all dependencies installed. Run `python server.py` manually
 to check for startup errors on stderr.
 
-**`401 Unauthorized` from the REST adapter**
-Include the `X-API-Key: <value>` header on every request except `GET /health`.
-The value must match `REST_API_KEY` in your `.env`.
+**`401 Unauthorized` / `403 Forbidden` from the REST adapter**
+Every request except `GET /health` must present a valid credential, as
+`Authorization: Bearer <token>` or `X-API-Key: <token>`. `401` means no credential
+was sent; `403` means it didn't match `REST_API_KEY` or any entry in
+`REST_API_TOKENS`.
