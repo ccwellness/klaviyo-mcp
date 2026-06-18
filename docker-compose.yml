@@ -1,0 +1,28 @@
+# docker-compose.yml — run the Flask REST adapter as a container.
+#
+#   docker compose up --build
+#
+# Secrets and config are supplied at run time, never baked into the image:
+#   - .env (REST_API_KEY + the Klaviyo per-account keys named in accounts.toml) is loaded via
+#     env_file. Copy .env.example to .env and fill it in first.
+#   - accounts.toml (non-secret) is mounted read-only and pointed at by ACCOUNTS_FILE.
+#
+# The REST API then answers on http://127.0.0.1:8080 (every route except GET /health requires the
+# X-API-Key header).
+
+services:
+  rest:
+    build: .
+    image: klaviyo-mcp-rest
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      # accounts.toml is mounted at this path; point the config loader straight at it.
+      ACCOUNTS_FILE: /app/accounts.toml
+      # Response-cache TTL in seconds (0 disables). Override here without touching .env.
+      CACHE_TTL_SECONDS: "300"
+    volumes:
+      - ./accounts.toml:/app/accounts.toml:ro
+    restart: unless-stopped

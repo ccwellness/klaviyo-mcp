@@ -1,0 +1,21 @@
+# requirements.prod.in — runtime dependencies for the Flask REST container ONLY.
+#
+# The REST adapter (api/) and the business layer (klaviyo_analytics/) never import `mcp`
+# (only server.py, the MCP stdio transport, does) and need none of the dev/test tooling, so the
+# container image is built from this slim, hash-pinned subset rather than the full requirements.txt.
+#
+# Regenerate (on Python 3.11, see README "Updating dependencies"):
+#   pip-compile --allow-unsafe --generate-hashes --output-file=requirements.prod.txt requirements.prod.in
+
+# --- Klaviyo REST client (direct httpx; no official SDK) ---
+httpx==0.27.2
+
+# --- REST transport ---
+flask==3.0.3
+gunicorn==22.0.0          # WSGI server for the container (Linux only)
+
+# --- Config ---
+python-dotenv==1.0.1
+
+# --- Observability ---
+structlog==24.4.0

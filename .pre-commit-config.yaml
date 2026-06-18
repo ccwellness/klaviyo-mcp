@@ -49,8 +49,8 @@ repos:
         exclude: |
           (?x)^(
             \.secrets\.baseline|
-            requirements\.txt|
-            requirements\.in
+            requirements(\.prod)?\.txt|
+            requirements(\.prod)?\.in
           )$
 
   # ---------------------------------------------------------------------------

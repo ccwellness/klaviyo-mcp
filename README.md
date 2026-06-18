@@ -232,6 +232,32 @@ flask --app api run --host 127.0.0.1 --port 8080
 gunicorn --workers 2 "api:create_app()"
 ```
 
+#### Docker
+
+The REST adapter ships a container (the MCP stdio transport runs locally and is
+not containerised). The image is built from `requirements.prod.txt` — the REST
+runtime deps only, no `mcp` and no dev tooling — runs as a non-root user, and
+serves `api:create_app()` via gunicorn with a `GET /health` healthcheck.
+
+Secrets are never baked into the image: `.env` (the `REST_API_KEY` plus the
+Klaviyo per-account keys) is loaded at run time, and `accounts.toml` is mounted
+read-only.
+
+```bash
+# Fill in secrets first
+cp .env.example .env   # set REST_API_KEY and your KLAVIYO_*_KEY values
+
+# Build + run with compose (serves http://127.0.0.1:8080)
+docker compose up --build
+
+# Or plain docker
+docker build -t klaviyo-mcp-rest .
+docker run --rm -p 8080:8080 --env-file .env \
+    -e ACCOUNTS_FILE=/app/accounts.toml \
+    -v "$PWD/accounts.toml:/app/accounts.toml:ro" \
+    klaviyo-mcp-rest
+```
+
 **Example requests:**
 
 ```bash
@@ -1189,13 +1215,17 @@ credentials.
 
 ### Updating dependencies
 
-The lock file (`requirements.txt`) is managed with pip-tools. To regenerate:
+Two lock files are managed with pip-tools: `requirements.txt` (everything —
+runtime, MCP, and dev/test) for local development, and `requirements.prod.txt`
+(REST runtime only, no `mcp`, no dev tooling) for the Docker image. Regenerate
+both when changing pins:
 
 ```bash
-pip-compile --generate-hashes --output-file=requirements.txt requirements.in
+pip-compile --allow-unsafe --generate-hashes --output-file=requirements.txt requirements.in
+pip-compile --allow-unsafe --generate-hashes --output-file=requirements.prod.txt requirements.prod.in
 ```
 
-**Important:** Always regenerate the lock file on Python 3.11 (the project's
+**Important:** Always regenerate the lock files on Python 3.11 (the project's
 target). Compiling on a different minor version can pin version-specific or
 platform-specific wheels and produce hashes that fail `--require-hashes` on 3.11.
 
@@ -1331,10 +1361,16 @@ continues rather than aborting. See `live_smoke.py` for details.
   skips message-name resolution (moot under rollup). See
   [`klaviyo_get_flow_performance`](#klaviyo_get_flow_performance)
 
+**WP-12 — done:**
+
+- Containerisation of the REST adapter: `Dockerfile` (slim `python:3.11-slim`, non-root, gunicorn,
+  `/health` healthcheck) built from a new REST-runtime-only lock `requirements.prod.txt`
+  (no `mcp`, no dev tooling), `docker-compose.yml` (env-based secrets, mounted `accounts.toml`),
+  and `.dockerignore`. Secrets are never baked into the image. See [Docker](#docker)
+
 **Deferred to later work packages:**
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials
-- Containerisation (`Dockerfile`, `docker-compose.yml`)
 
 ---
 

@@ -1,0 +1,33 @@
+# Keep the build context (and image) small and secret-free.
+
+# Secrets — never copy these into the image.
+.env
+*.env
+
+# Virtualenv and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+
+# VCS, CI, editor
+.git/
+.github/
+.pre-commit-config.yaml
+.secrets.baseline
+
+# Tests and the MCP transport (the image serves the REST adapter only)
+tests/
+server.py
+live_smoke.py
+
+# Docs / project files not needed at runtime
+README.md
+*.md
+docker-compose.yml
+Dockerfile
+.dockerignore
