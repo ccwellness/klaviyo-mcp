@@ -1,0 +1,50 @@
+# CI — lint, type-check, and test on the project's pinned Python 3.11.
+#
+# Mirrors the local dev workflow (README "Dev workflow"): hash-verified install,
+# ruff lint + format check, mypy on the strict business modules, and the pytest
+# suite with the 80% coverage gate. Live integration tests (-m integration) are
+# excluded — they require real Klaviyo credentials.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install hash-verified dependencies
+        run: |
+          python -m pip install --upgrade "pip==24.2"
+          pip install --require-hashes -r requirements.txt
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      # Strict typing is enforced on the business modules (see pyproject
+      # [[tool.mypy.overrides]]). The tests/ tree has intentional dynamic-dict
+      # fixtures that mypy flags; gating on the modules below matches intent.
+      - name: Mypy (business modules)
+        run: mypy klaviyo_analytics server.py api
+
+      - name: Pytest (unit) with coverage gate
+        run: pytest -m "not integration" --cov --cov-report=term-missing
