@@ -352,7 +352,7 @@ today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
 | `klaviyo_get_flows` | `GET /v1/flows` | `status?`, `archived?` | `flows[]{flow_id, name, status, trigger_type, archived, created, updated}`, `flow_count` |
 | `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`+`end_date` **or** `timeframe`, `flow?`, `resolve_message_names?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
 | `klaviyo_get_flow_structure` | `GET /v1/flows/<flow_id>/structure` | `flow_id` (required), `account?` | `flow_id`, `action_count`, `steps[]{action_id, action_type, message_id, message_name, channel}`, `summary{action_type: count}` |
-| `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`), `start_date`+`end_date` **or** `timeframe`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
+| `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`/`campaign`), `start_date`+`end_date` **or** `timeframe`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
 | `klaviyo_compare_periods` | `POST /v1/performance/compare` | `entity` (`campaign`/`flow`), `start_date`+`end_date` **or** `timeframe`, `prior_start_date?`+`prior_end_date?`, `entity_id?` | `entity`, `current_period`, `prior_period`, `current_totals`, `prior_totals`, `deltas{metric:{absolute, pct_change}}`, `current_entity_count`, `prior_entity_count` |
 | `klaviyo_get_list_health` | `GET /v1/lists/health` | `list_id?` | `lists[]{list_id, name, opt_in_process, profile_count, created, updated}`, `list_count`, `total_profiles` |
 | `klaviyo_get_list_growth` | `POST /v1/lists/growth` | `start_date`+`end_date` **or** `timeframe` | `growth{list, email, sms}{subscribed, unsubscribed, net}` |
@@ -711,36 +711,53 @@ curl -H "X-API-Key: your-rest-secret" \
 
 ### `klaviyo_get_performance_over_time`
 
-Bucketed over-time series for flows over an absolute date range. Returns a
-`date_times` array and one or more series rows, each with statistics arrays
-positionally aligned to `date_times`.
+Bucketed over-time series for **flows or campaigns** over a date range. Returns a
+`date_times` array and one series row per flow/campaign, each with statistics
+arrays positionally aligned to `date_times`.
 
-Klaviyo provides time-series (bucketed) reports for flows only. There is no
-campaign-series endpoint — `/api/campaign-series-reports` does not exist and
-returns 404 at every API revision. For campaign totals use
-`klaviyo_get_campaign_performance` instead.
+The two entities are served differently:
 
-Statistic arrays are returned as Klaviyo provides them, including rate
-statistics (e.g. `open_rate`, `click_rate`). See the [Over-time statistics
-note](#over-time-statistics-note) above.
+- **`flow`** uses Klaviyo's native flow-series report; its statistic arrays are
+  passed through verbatim (including rate statistics like `open_rate`), so they
+  reconcile with the Klaviyo UI. See the [Over-time statistics
+  note](#over-time-statistics-note).
+- **`campaign`** is **stitched**: Klaviyo has no campaign-series endpoint
+  (`/api/campaign-series-reports` 404s at every revision), so the service issues
+  one `campaign-values` report **per bucket** and assembles the series. This means
+  `daily`/`weekly`/`monthly` only (no `hourly`), and **one rate-limited report call
+  per bucket** — so the bucket count is capped (53) and weekly/monthly are strongly
+  preferred for campaigns. A campaign is a one-time send, so it appears as a spike
+  in the bucket(s) its send and engagement fall in, not a continuous line. Campaign
+  statistics use the same names as the flow series (`recipients`, `delivered`,
+  `opens_unique`, `clicks_unique`, `conversions`, `conversion_value`); rate
+  statistics are not available for campaign trends.
 
 **Inputs:**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `account` | string | No* | Canonical account name. Required when more than one account is configured. |
-| `entity` | string | Yes | Must be `flow`. Klaviyo has no campaign time-series endpoint; use `klaviyo_get_campaign_performance` for campaign totals. |
+| `entity` | string | Yes | `flow` (native series) or `campaign` (stitched from campaign-values). |
 | `start_date` | string | No† | Inclusive start date, `YYYY-MM-DD` |
 | `end_date` | string | No† | Inclusive end date, `YYYY-MM-DD` |
 | `timeframe` | string | No† | Named relative window (see [Timeframe presets](#timeframe-presets)) as an alternative to `start_date`+`end_date` |
-| `interval` | string | No | Bucket size: `hourly`, `daily`, `weekly` (default), or `monthly` |
-| `entity_id` | string | No | Klaviyo flow id — narrows results to one flow |
+| `interval` | string | No | Bucket size: `hourly`, `daily`, `weekly` (default), or `monthly`. Campaigns support `daily`/`weekly`/`monthly` only (no `hourly`). |
+| `entity_id` | string | No | Klaviyo flow/campaign id — narrows results to one entity |
 | `statistics` | array of strings | No | Statistic names to request; defaults to a volume + engagement + conversion subset |
 
 † Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
 
 The date range may not exceed 366 days. Passing an invalid `interval` or
 unsupported `entity` value returns an `INVALID_ARGUMENT` error.
+
+**Campaign trend rate-limit cost.** Each campaign bucket is a separate
+`campaign-values` report call, and those endpoints allow only ~1/sec and 2/min.
+The service paces the calls (~1.1 s apart) to stay under the burst limit and caps
+the bucket count at **53**, but a wide range is still slow — **prefer `monthly` or
+`weekly`** for campaigns (e.g. 4 monthly buckets ≈ 15 s; a full quarter of weekly
+buckets can take a minute or more under throttling). The [response
+cache](#response-caching) makes a repeated trend instant, and a retried call after
+a partial throttle reuses the buckets already cached.
 
 **Output:**
 
@@ -781,6 +798,21 @@ unsupported `entity` value returns an `INVALID_ARGUMENT` error.
 
 **REST equivalent:** `POST /v1/performance/over-time` with a JSON body
 containing the same fields.
+
+```bash
+# Campaign trend, monthly (one campaign-values call per month — keep it coarse)
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "entity": "campaign", "timeframe": "last_90_days", "interval": "monthly"}' \
+     http://127.0.0.1:8080/v1/performance/over-time
+```
+
+A campaign trend returns one series per campaign with statistics named like the
+flow series (`recipients`, `delivered`, `opens_unique`, `clicks_unique`,
+`conversions`, `conversion_value`); a campaign shows nonzero values only in the
+bucket(s) its send and engagement fall in. The `warnings` array carries the
+`time_basis` note and a note explaining the stitched shape.
 
 ---
 
@@ -1240,13 +1272,21 @@ continues rather than aborting. See `live_smoke.py` for details.
   disable). Eases Klaviyo's report rate limits and makes repeated queries near-instant. See
   [Response caching](#response-caching)
 
+**WP-9 — done:**
+
+- Campaign trends: `klaviyo_get_performance_over_time` now accepts `entity="campaign"` and builds
+  the series by stitching one `campaign-values` report per bucket (`daily`/`weekly`/`monthly`),
+  since Klaviyo has no campaign-series endpoint. Output matches the flow series shape (one series
+  per campaign, flow-series statistic names). Calls are paced (~1.1 s) to respect the report burst
+  limit and capped at 53 buckets; the response cache makes repeats instant. See
+  [`klaviyo_get_performance_over_time`](#klaviyo_get_performance_over_time)
+
 **Deferred to later work packages:**
 
 - Auto-chunking for date ranges exceeding one year
 - Per-flow rollup
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials
-- Campaign trends over time (would require stitching campaign-values across sub-windows, as Klaviyo has no campaign-series endpoint)
 - Containerisation (`Dockerfile`, `docker-compose.yml`)
 
 ---

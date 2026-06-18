@@ -556,24 +556,18 @@ class TestGetFlowPerformance:
 
 
 class TestGetPerformanceOverTime:
-    def test_campaign_entity_raises_invalid_argument(self, mock_client):
-        """entity='campaign' raises INVALID_ARGUMENT — Klaviyo has no campaign-series endpoint."""
+    def test_campaign_entity_is_supported(self, mock_client):
+        """entity='campaign' is now stitched from campaign-values (covered in test_service_wp9)."""
         service = _make_service(mock_client)
+        mock_client.post.return_value = {
+            "data": {"type": "campaign-values-report", "attributes": {"results": []}}
+        }
 
-        with pytest.raises(KlaviyoServiceError) as exc_info:
-            service.get_performance_over_time("acme", "campaign", "2025-01-01", "2025-01-31")
+        response = service.get_performance_over_time(
+            "acme", "campaign", "2025-01-01", "2025-01-31", interval="weekly"
+        )
 
-        assert exc_info.value.code == "INVALID_ARGUMENT"
-        mock_client.post.assert_not_called()
-
-    def test_campaign_entity_error_message_references_get_campaign_performance(self, mock_client):
-        """INVALID_ARGUMENT for campaign entity must reference get_campaign_performance."""
-        service = _make_service(mock_client)
-
-        with pytest.raises(KlaviyoServiceError) as exc_info:
-            service.get_performance_over_time("acme", "campaign", "2025-01-01", "2025-01-31")
-
-        assert "get_campaign_performance" in exc_info.value.message
+        assert response.data["entity"] == "campaign"
 
     def test_returns_service_response_for_flow(self, mock_client):
         service = _make_service(mock_client)
@@ -760,9 +754,7 @@ class TestGetPerformanceOverTime:
         assert exc_info.value.code == "INVALID_ARGUMENT"
         mock_client.post.assert_not_called()
 
-    @pytest.mark.parametrize(
-        "bad_entity", ["campaigns", "CAMPAIGN", "flows", "", "list", "campaign", "form"]
-    )
+    @pytest.mark.parametrize("bad_entity", ["campaigns", "CAMPAIGN", "flows", "", "list", "form"])
     def test_invalid_entity_variants(self, mock_client, bad_entity):
         service = _make_service(mock_client)
 

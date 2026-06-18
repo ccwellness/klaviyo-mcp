@@ -100,17 +100,47 @@ _CAMPAIGN_VALUES_TYPE = "campaign-values-report"
 _FLOW_VALUES_TYPE = "flow-values-report"
 _FLOW_SERIES_TYPE = "flow-series-report"
 
-# Over-time dispatch: entity -> (series endpoint path, series ``data.type``). Klaviyo exposes
-# series (time-bucketed) reports for flows only — there is NO campaign-series endpoint
-# (``/api/campaign-series-reports`` 404s at every revision). Campaign trends would require
-# stitching campaign-values across sub-windows (a later WP). Forms/segments series are out of
-# scope. Kept as a dict so forms/segments can be added without reshaping the dispatch.
+# Over-time dispatch: entity -> (series endpoint path, series ``data.type``). Klaviyo exposes a
+# native series (time-bucketed) report for flows only — there is NO campaign-series endpoint
+# (``/api/campaign-series-reports`` 404s at every revision). Campaigns are trended instead by
+# stitching campaign-values across sub-windows (see ``_campaign_trend``). Forms/segments series
+# are out of scope. Kept as a dict so forms/segments can be added without reshaping the dispatch.
 _SERIES_ENDPOINTS: dict[str, tuple[str, str]] = {
     "flow": (_FLOW_SERIES_PATH, _FLOW_SERIES_TYPE),
 }
 
+# Entities the over-time tool accepts: ``flow`` (native series) and ``campaign`` (stitched).
+_OVER_TIME_ENTITIES: frozenset[str] = frozenset({"flow", "campaign"})
+
 # Klaviyo's supported series bucket intervals; ``weekly`` is the Klaviyo default.
 _SERIES_INTERVALS: frozenset[str] = frozenset({"hourly", "daily", "weekly", "monthly"})
+
+# Campaign trends stitch one campaign-values report per bucket, so the bucket count is capped to
+# keep a single call from fanning out into hundreds of rate-limited report requests (53 ≈ a year
+# of weeks, or a year of months with room to spare).
+_MAX_TREND_BUCKETS = 53
+
+# Campaign trend statistic name -> the ``CampaignMetrics`` field it reads. Uses the same names as
+# the flow-series report so both over-time entities expose one consistent statistic vocabulary.
+_CAMPAIGN_TREND_STAT_MAP: dict[str, str] = {
+    "recipients": "sent",
+    "delivered": "delivered",
+    "opens_unique": "opens",
+    "clicks_unique": "clicks",
+    "conversions": "conversions",
+    "conversion_value": "conversion_value",
+}
+
+# Pause between stitched campaign-values calls so the burst stays under Klaviyo's report limit
+# (~1 request/second), sparing the client's retry budget for the slower steady-rate throttle.
+_TREND_PACING_SECONDS = 1.1
+
+# Surfaced on campaign trends to explain the stitched, send-date-bucketed shape.
+_CAMPAIGN_TREND_NOTE = (
+    "Campaign trends are stitched from one campaign-values report per bucket (Klaviyo has no "
+    "campaign-series endpoint). A campaign is counted in the bucket(s) its send and engagement "
+    "fall in, so a one-time campaign appears as a spike rather than a continuous line."
+)
 
 # A reporting timeframe wider than this is rejected up front so the caller gets a clean
 # INVALID_ARGUMENT rather than a raw Klaviyo 4XX. 366 days admits a full leap-year window.
@@ -191,6 +221,41 @@ def _count_for(counts: dict[str, int] | None, name: str | None) -> int | None:
     if counts is None or name is None:
         return None
     return counts.get(name, 0)
+
+
+def _month_end(day: date) -> date:
+    """Return the last day of ``day``'s calendar month."""
+    if day.month == 12:
+        first_of_next = date(day.year + 1, 1, 1)
+    else:
+        first_of_next = date(day.year, day.month + 1, 1)
+    return first_of_next - timedelta(days=1)
+
+
+def _sleep(seconds: float) -> None:  # pragma: no cover - thin wrapper, patched out in tests
+    """Sleep for ``seconds`` (indirected so tests can stub the trend pacing to a no-op)."""
+    time.sleep(seconds)
+
+
+def _build_buckets(start: date, end: date, interval: str) -> list[tuple[date, date]]:
+    """Split ``[start, end]`` (inclusive) into ``(start, end)`` buckets for the given interval.
+
+    ``daily`` yields one bucket per day; ``weekly`` yields 7-day windows anchored at ``start``;
+    ``monthly`` yields calendar-month windows (first/last buckets clamped to the range). Every
+    bucket is clamped so none extends past ``end``.
+    """
+    buckets: list[tuple[date, date]] = []
+    cursor = start
+    while cursor <= end:
+        if interval == "daily":
+            bucket_end = cursor
+        elif interval == "weekly":
+            bucket_end = min(cursor + timedelta(days=6), end)
+        else:  # monthly
+            bucket_end = min(_month_end(cursor), end)
+        buckets.append((cursor, bucket_end))
+        cursor = bucket_end + timedelta(days=1)
+    return buckets
 
 
 def _is_absolute_date(token: str) -> bool:
@@ -838,29 +903,34 @@ class KlaviyoService:
         *,
         timeframe: str | None = None,
     ) -> ServiceResponse:
-        """Fetch a bucketed over-time series for a flow.
+        """Fetch a bucketed over-time series for a flow or campaign.
 
-        Validates ``entity`` (only ``flow`` — Klaviyo has no campaign-series endpoint) and
-        ``interval`` (one of the Klaviyo bucket sizes), resolves the period (named ``timeframe``
-        preset or explicit ``start_date``/``end_date``), posts to the matching series report,
-        and returns the report's top-level
-        ``date_times`` alongside per-grouping statistic arrays. Klaviyo's statistic arrays are
-        passed through verbatim (including any rate statistics) — they are positionally aligned
-        to ``date_times`` and reconcile with the Klaviyo UI, so recomputation would only risk
-        divergence. An optional ``entity_id`` filters to one campaign/flow id; ``statistics``
-        overrides the default trend set.
+        Validates ``entity`` (``flow`` or ``campaign``) and ``interval``, resolves the period
+        (named ``timeframe`` preset or explicit ``start_date``/``end_date``), and returns
+        ``date_times`` with per-grouping statistic arrays positionally aligned to them. An optional
+        ``entity_id`` filters to one flow/campaign id; ``statistics`` overrides the default set.
+
+        ``flow`` uses Klaviyo's native flow-series report and passes its statistic arrays through
+        verbatim. Klaviyo has no campaign-series endpoint, so ``campaign`` is built by *stitching*
+        one campaign-values report per bucket (``daily``/``weekly``/``monthly`` only) — this issues
+        one rate-limited report call per bucket (capped), and the ``time_basis`` caveat applies.
         """
         resolved = self._registry.resolve(account)
-        path, report_type = self._series_endpoint(entity)
+        self._validate_over_time_entity(entity)
         validated_interval = self._validated_interval(interval)
         period = self._resolve_period(timeframe, start_date, end_date)
-        requested = statistics if statistics is not None else metrics.SERIES_DEFAULT_STATISTICS
-        attributes = self._build_report_attributes(
-            resolved, report_type, requested, period, interval=validated_interval
-        )
 
-        body, latency_ms = self._timed_post(resolved.api_key, path, attributes)
-        date_times, series = self._shape_series(body, entity, entity_id)
+        if entity == "campaign":
+            date_times, series, latency_ms = self._campaign_trend(
+                resolved, period, validated_interval, entity_id, statistics
+            )
+            warnings: tuple[str, ...] = (metrics.TIME_BASIS_NOTE, _CAMPAIGN_TREND_NOTE)
+        else:
+            date_times, series, latency_ms = self._flow_series(
+                resolved, period, validated_interval, entity_id, statistics
+            )
+            warnings = ()
+
         data = {
             "entity": entity,
             "interval": validated_interval,
@@ -873,7 +943,131 @@ class KlaviyoService:
             revision=self._cfg.revision,
             latency_ms=latency_ms,
         )
-        return ServiceResponse(data=data, metadata=meta)
+        return ServiceResponse(data=data, metadata=meta, warnings=warnings)
+
+    def _flow_series(
+        self,
+        account: AccountConfig,
+        period: ReportPeriod,
+        interval: str,
+        entity_id: str | None,
+        statistics: tuple[str, ...] | None,
+    ) -> tuple[list, list[SeriesGroup], float]:
+        """Fetch the flow-series report and shape it into ``(date_times, series, latency_ms)``."""
+        path, report_type = self._series_endpoint("flow")
+        requested = statistics if statistics is not None else metrics.SERIES_DEFAULT_STATISTICS
+        attributes = self._build_report_attributes(
+            account, report_type, requested, period, interval=interval
+        )
+        body, latency_ms = self._timed_post(account.api_key, path, attributes)
+        date_times, series = self._shape_series(body, "flow", entity_id)
+        return date_times, series, latency_ms
+
+    def _campaign_trend(
+        self,
+        account: AccountConfig,
+        period: ReportPeriod,
+        interval: str,
+        entity_id: str | None,
+        statistics: tuple[str, ...] | None,
+    ) -> tuple[list, list[SeriesGroup], float]:
+        """Build a campaign over-time series by stitching one campaign-values report per bucket.
+
+        Each bucket's per-campaign rows populate that bucket's slot in every campaign's statistic
+        arrays (campaigns absent from a bucket read ``0``). Returns the bucket start datetimes, one
+        ``SeriesGroup`` per campaign seen, and the summed upstream latency.
+        """
+        buckets = self._trend_buckets(period, interval)
+        fields = self._campaign_trend_fields(statistics)
+        date_times = [f"{start.isoformat()}T00:00:00" for start, _ in buckets]
+        accumulator: dict[str, dict] = {}
+        order: list[str] = []
+        total_latency = 0.0
+        for index, (bucket_start, bucket_end) in enumerate(buckets):
+            if index > 0:
+                _sleep(_TREND_PACING_SECONDS)  # respect the ~1/sec report burst limit
+            bucket_period = ReportPeriod(
+                start_date=bucket_start.isoformat(), end_date=bucket_end.isoformat()
+            )
+            rows, latency = self._fetch_campaign_metrics(account, bucket_period, entity_id)
+            total_latency += latency
+            for row in rows:
+                entry = accumulator.get(row.campaign_id)
+                if entry is None:
+                    entry = {
+                        "name": row.campaign_name,
+                        "stats": {name: [0.0] * len(buckets) for name in fields},
+                    }
+                    accumulator[row.campaign_id] = entry
+                    order.append(row.campaign_id)
+                row_dict = row.to_dict()
+                for stat_name, field in fields.items():
+                    entry["stats"][stat_name][index] = _to_float(row_dict.get(field))
+        series = [
+            SeriesGroup(
+                groupings={"campaign_id": cid, "campaign_name": accumulator[cid]["name"]},
+                statistics=accumulator[cid]["stats"],
+            )
+            for cid in order
+        ]
+        return date_times, series, round(total_latency, 4)
+
+    def _trend_buckets(self, period: ReportPeriod, interval: str) -> list[tuple[date, date]]:
+        """Split the period into inclusive ``(start, end)`` buckets for a campaign trend.
+
+        Campaign-values timeframes are date-granular, so ``hourly`` is unavailable; the bucket
+        count is capped so a wide ``daily`` range cannot fan out into hundreds of rate-limited
+        report calls.
+        """
+        if interval == "hourly":
+            raise KlaviyoServiceError(
+                "INVALID_ARGUMENT",
+                "campaign trends support daily, weekly, or monthly intervals (not hourly)",
+                http_status=400,
+            )
+        start = date.fromisoformat(period.start_date)
+        end = date.fromisoformat(period.end_date)
+        buckets = _build_buckets(start, end, interval)
+        if len(buckets) > _MAX_TREND_BUCKETS:
+            raise KlaviyoServiceError(
+                "INVALID_ARGUMENT",
+                f"campaign trend spans {len(buckets)} {interval} buckets; the maximum is "
+                f"{_MAX_TREND_BUCKETS}. Use a coarser interval or a shorter range "
+                "(each bucket is a separate rate-limited report call).",
+                http_status=400,
+            )
+        return buckets
+
+    def _campaign_trend_fields(self, statistics: tuple[str, ...] | None) -> dict[str, str]:
+        """Map requested Klaviyo statistic names to ``CampaignMetrics`` fields for the trend.
+
+        Defaults to the standard series statistics. An unsupported name (e.g. a flow-only or rate
+        statistic) is rejected so the caller gets a clear error rather than a column of zeros.
+        """
+        requested = statistics if statistics is not None else metrics.SERIES_DEFAULT_STATISTICS
+        fields: dict[str, str] = {}
+        for name in requested:
+            field = _CAMPAIGN_TREND_STAT_MAP.get(name)
+            if field is None:
+                allowed = ", ".join(sorted(_CAMPAIGN_TREND_STAT_MAP))
+                raise KlaviyoServiceError(
+                    "INVALID_ARGUMENT",
+                    f"statistic {name!r} is not available for campaign trends; "
+                    f"expected one of: {allowed}",
+                    http_status=400,
+                )
+            fields[name] = field
+        return fields
+
+    def _validate_over_time_entity(self, entity: str) -> None:
+        """Raise INVALID_ARGUMENT unless ``entity`` is a supported over-time entity."""
+        if entity not in _OVER_TIME_ENTITIES:
+            allowed = ", ".join(sorted(_OVER_TIME_ENTITIES))
+            raise KlaviyoServiceError(
+                "INVALID_ARGUMENT",
+                f"entity {entity!r} is not supported; expected one of: {allowed}",
+                http_status=400,
+            )
 
     # -- Period-over-period comparison ----------------------------------------
 
@@ -1082,28 +1276,14 @@ class KlaviyoService:
         return interval
 
     def _series_endpoint(self, entity: str) -> tuple[str, str]:
-        """Return the (series path, report type) for ``entity``, or raise INVALID_ARGUMENT.
+        """Return the native series (path, report type) for ``entity``.
 
-        Klaviyo offers time-series reports for flows only; ``campaign`` is rejected with a
-        pointer to ``get_campaign_performance`` (which returns campaign totals).
+        Only flows have a native Klaviyo series endpoint; campaigns are handled separately by
+        ``_campaign_trend``. The caller (``_flow_series``) always passes ``"flow"`` after
+        ``_validate_over_time_entity`` has accepted the request, so a KeyError here would signal
+        an internal wiring bug rather than caller input.
         """
-        endpoint = _SERIES_ENDPOINTS.get(entity)
-        if endpoint is not None:
-            return endpoint
-        allowed = ", ".join(sorted(_SERIES_ENDPOINTS))
-        if entity == "campaign":
-            raise KlaviyoServiceError(
-                "INVALID_ARGUMENT",
-                "Klaviyo provides no campaign time-series endpoint; use "
-                "get_campaign_performance for campaign totals, or call this with "
-                'entity="flow".',
-                http_status=400,
-            )
-        raise KlaviyoServiceError(
-            "INVALID_ARGUMENT",
-            f"entity {entity!r} is not supported; expected one of: {allowed}",
-            http_status=400,
-        )
+        return _SERIES_ENDPOINTS[entity]
 
     def _flows_path(self, status: str | None, archived: bool | None) -> str:
         """Build the ``GET /api/flows`` path with an optional AND-combined ``filter`` clause.

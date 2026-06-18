@@ -384,9 +384,11 @@ async def list_tools() -> list[Tool]:
                 "plus per-grouping statistic arrays positionally aligned to date_times. "
                 "interval is one of hourly, daily, weekly (default), or monthly. Specify the "
                 "window with either a 'timeframe' preset or start_date+end_date. Optionally "
-                "narrow to one flow id (entity_id) and override the default statistics. The "
-                "date range may not exceed one year. Note: Klaviyo has no campaign time-series "
-                "endpoint — use klaviyo_get_campaign_performance for campaign totals."
+                "narrow to one flow/campaign id (entity_id) and override the default statistics. "
+                "The date range may not exceed one year. 'flow' uses Klaviyo's native series "
+                "report; 'campaign' is stitched from one campaign-values report per bucket "
+                "(daily/weekly/monthly only, bucket count capped) since Klaviyo has no "
+                "campaign-series endpoint — prefer weekly/monthly for campaigns to limit calls."
             ),
             inputSchema={
                 "type": "object",
@@ -394,8 +396,11 @@ async def list_tools() -> list[Tool]:
                     "account": {"type": "string", "description": _ACCOUNT_DESC},
                     "entity": {
                         "type": "string",
-                        "enum": ["flow"],
-                        "description": "Entity to trend. Only 'flow' is supported by Klaviyo.",
+                        "enum": ["flow", "campaign"],
+                        "description": (
+                            "Entity to trend: 'flow' (native series) or 'campaign' (stitched "
+                            "from campaign-values; daily/weekly/monthly only)."
+                        ),
                     },
                     "start_date": {"type": "string", "description": _DATE_DESC},
                     "end_date": {"type": "string", "description": _DATE_DESC},
