@@ -55,6 +55,8 @@ ignore = [
 # live_smoke.py: standalone operator connectivity CLI. Printing is its purpose, and
 # its sequential PASS/FAIL/WARN flow over several checks is legitimately long/branchy.
 "live_smoke.py" = ["T201", "C901", "PLR0912", "PLR0915"]
+# install.py: standalone operator setup CLI (prints + sequential setup/report flow).
+"install.py" = ["T201", "C901", "PLR0912", "PLR0915"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10

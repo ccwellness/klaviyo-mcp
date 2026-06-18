@@ -105,6 +105,27 @@ pre-commit install --hook-type commit-msg --hook-type pre-commit
 Configuration has two parts: **secrets** in `.env` and the **account manifest**
 in `accounts.toml`. Only `.env` is secret. `accounts.toml` is safe to commit.
 
+### Quick start: the installer
+
+`python install.py` sets up and checks your configuration in one step:
+
+- **scaffolds** the per-user config directory with `.env` and `accounts.toml`
+  templates (existing files are never overwritten — use `--force` to replace them);
+- **validates** that the account manifest parses and every referenced API-key
+  environment variable resolves (the same fail-fast the server does at startup);
+- with `--check-api`, **pings Klaviyo once per account** to confirm each key works;
+- prints the **MCP server entry** to drop into `.mcp.json` /
+  `claude_desktop_config.json`.
+
+```bash
+python install.py                 # scaffold + validate + print MCP config
+python install.py --check-api     # also verify each key against Klaviyo
+python install.py --config-dir ./somewhere --no-scaffold   # validate only, custom dir
+```
+
+Fill in the scaffolded `.env` and `accounts.toml` with your real values, then
+re-run to confirm. The two files are described below.
+
 ### Secrets: `.env`
 
 Copy `.env.example` to `.env` and fill in the values. The service reads `.env`
@@ -1368,9 +1389,16 @@ continues rather than aborting. See `live_smoke.py` for details.
   (no `mcp`, no dev tooling), `docker-compose.yml` (env-based secrets, mounted `accounts.toml`),
   and `.dockerignore`. Secrets are never baked into the image. See [Docker](#docker)
 
+**WP-13 — done:**
+
+- Installer / configurator CLI (`install.py`): scaffolds the per-user config directory with `.env`
+  and `accounts.toml` templates (never overwriting without `--force`), validates that every
+  account's API-key env var resolves, optionally pings Klaviyo per account (`--check-api`), and
+  prints the MCP server config entry. Reuses `paths.py` and the registry loader; helpers are unit
+  tested. See [Quick start: the installer](#quick-start-the-installer)
+
 **Deferred to later work packages:**
 - OAuth / token-based auth for the REST adapter
-- Installer that writes the user-config directory and validates credentials
 
 ---
 
