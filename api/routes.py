@@ -137,6 +137,7 @@ def flow_performance() -> tuple[Response, int]:
             body.get("flow"),
             bool(body.get("resolve_message_names", False)),
             timeframe=body.get("timeframe"),
+            rollup=bool(body.get("rollup", False)),
         )
     )
 

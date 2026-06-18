@@ -264,7 +264,7 @@ class TestGetFlowPerformanceDispatch:
             _run(server.call_tool("klaviyo_get_flow_performance", {"account": "acme"}))
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", None, None, None, False, timeframe=None
+            "acme", None, None, None, False, timeframe=None, rollup=False
         )
 
     def test_timeframe_forwarded(self, mock_service):
@@ -279,8 +279,21 @@ class TestGetFlowPerformanceDispatch:
             )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", None, None, None, False, timeframe="last_7_days"
+            "acme", None, None, None, False, timeframe="last_7_days", rollup=False
         )
+
+    def test_rollup_forwarded(self, mock_service):
+        mock_service.get_flow_performance.return_value = _flow_perf_response()
+
+        with _inject_service(mock_service):
+            _run(
+                server.call_tool(
+                    "klaviyo_get_flow_performance",
+                    {"account": "acme", "timeframe": "last_7_days", "rollup": True},
+                )
+            )
+
+        assert mock_service.get_flow_performance.call_args.kwargs["rollup"] is True
 
     def test_service_error_returned_as_envelope(self, mock_service):
         mock_service.get_flow_performance.side_effect = KlaviyoServiceError(

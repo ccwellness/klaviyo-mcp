@@ -261,7 +261,7 @@ class TestFlowPerformanceEndpoint:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", None, False, timeframe=None
+            "acme", "2025-01-01", "2025-01-31", None, False, timeframe=None, rollup=False
         )
 
     def test_timeframe_forwarded(self, client, mock_service):
@@ -274,8 +274,19 @@ class TestFlowPerformanceEndpoint:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", None, None, None, False, timeframe="this_month"
+            "acme", None, None, None, False, timeframe="this_month", rollup=False
         )
+
+    def test_rollup_forwarded(self, client, mock_service):
+        mock_service.get_flow_performance.return_value = _flow_perf_response()
+
+        _json_post(
+            client,
+            "/v1/flows/performance",
+            {"account": "acme", "timeframe": "this_month", "rollup": True},
+        )
+
+        assert mock_service.get_flow_performance.call_args.kwargs["rollup"] is True
 
     def test_optional_flow_filter_forwarded(self, client, mock_service):
         mock_service.get_flow_performance.return_value = _flow_perf_response()
@@ -300,7 +311,7 @@ class TestFlowPerformanceEndpoint:
         _json_post(client, "/v1/flows/performance", {"account": "acme"})
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", None, None, None, False, timeframe=None
+            "acme", None, None, None, False, timeframe=None, rollup=False
         )
 
     def test_non_json_body_returns_400(self, client, mock_service):

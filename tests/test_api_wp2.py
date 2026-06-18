@@ -317,7 +317,7 @@ class TestFlowPerformanceResolveMessageNames:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            None, "2025-01-01", "2025-01-31", None, True, timeframe=None
+            None, "2025-01-01", "2025-01-31", None, True, timeframe=None, rollup=False
         )
 
     def test_resolve_message_names_false_forwarded(self, client, mock_service):
@@ -335,7 +335,7 @@ class TestFlowPerformanceResolveMessageNames:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            None, "2025-01-01", "2025-01-31", None, False, timeframe=None
+            None, "2025-01-01", "2025-01-31", None, False, timeframe=None, rollup=False
         )
 
     def test_resolve_message_names_absent_defaults_to_false(self, client, mock_service):
@@ -349,7 +349,7 @@ class TestFlowPerformanceResolveMessageNames:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            None, "2025-01-01", "2025-01-31", None, False, timeframe=None
+            None, "2025-01-01", "2025-01-31", None, False, timeframe=None, rollup=False
         )
 
     def test_resolve_message_names_true_returns_200(self, client, mock_service):
@@ -385,7 +385,7 @@ class TestFlowPerformanceResolveMessageNames:
         )
 
         mock_service.get_flow_performance.assert_called_once_with(
-            "acme", "2025-01-01", "2025-01-31", "FLOW001", True, timeframe=None
+            "acme", "2025-01-01", "2025-01-31", "FLOW001", True, timeframe=None, rollup=False
         )
 
 

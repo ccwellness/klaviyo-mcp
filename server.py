@@ -149,6 +149,7 @@ def handle_flow_performance(service: KlaviyoService, args: dict) -> ServiceRespo
         args.get("flow"),
         bool(args.get("resolve_message_names", False)),
         timeframe=args.get("timeframe"),
+        rollup=bool(args.get("rollup", False)),
     )
 
 
@@ -350,6 +351,14 @@ async def list_tools() -> list[Tool]:
                         "description": (
                             "When true, resolve each flow_message_id to its human message "
                             "name (one extra lookup per distinct message; default false)."
+                        ),
+                    },
+                    "rollup": {
+                        "type": "boolean",
+                        "description": (
+                            "When true, collapse the per-message/channel rows into one summed "
+                            "row per flow (flow_message_id, flow_message_name, and send_channel "
+                            "are null on a rolled-up row). Default false."
                         ),
                     },
                 },

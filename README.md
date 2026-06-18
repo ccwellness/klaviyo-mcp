@@ -372,7 +372,7 @@ overall range is capped at ~5 years. When a range is chunked, the response
 | `klaviyo_list_accounts` | `GET /v1/accounts` | — | `accounts[]{name, label}` |
 | `klaviyo_get_campaign_performance` | `POST /v1/campaigns/performance` | `start_date`+`end_date` **or** `timeframe`, `campaign?`, `resolve_campaign_names?` | `campaigns[]{campaign_id, campaign_name, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `campaign_count` |
 | `klaviyo_get_flows` | `GET /v1/flows` | `status?`, `archived?` | `flows[]{flow_id, name, status, trigger_type, archived, created, updated}`, `flow_count` |
-| `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`+`end_date` **or** `timeframe`, `flow?`, `resolve_message_names?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
+| `klaviyo_get_flow_performance` | `POST /v1/flows/performance` | `start_date`+`end_date` **or** `timeframe`, `flow?`, `resolve_message_names?`, `rollup?` | `flows[]{flow_id, flow_message_id, flow_message_name, send_channel, sent, delivered, opens, open_rate, clicks, click_rate, bounces, bounce_rate, unsubscribes, conversions, conversion_value}`, `flow_count` |
 | `klaviyo_get_flow_structure` | `GET /v1/flows/<flow_id>/structure` | `flow_id` (required), `account?` | `flow_id`, `action_count`, `steps[]{action_id, action_type, message_id, message_name, channel}`, `summary{action_type: count}` |
 | `klaviyo_get_performance_over_time` | `POST /v1/performance/over-time` | `entity` (`flow`/`campaign`), `start_date`+`end_date` **or** `timeframe`, `interval?`, `entity_id?`, `statistics?` | `entity`, `interval`, `date_times[]`, `series[]{groupings, statistics}` |
 | `klaviyo_compare_periods` | `POST /v1/performance/compare` | `entity` (`campaign`/`flow`), `start_date`+`end_date` **or** `timeframe`, `prior_start_date?`+`prior_end_date?`, `entity_id?` | `entity`, `current_period`, `prior_period`, `current_totals`, `prior_totals`, `deltas{metric:{absolute, pct_change}}`, `current_entity_count`, `prior_entity_count` |
@@ -549,8 +549,16 @@ channel (email or SMS).
 | `timeframe` | string | No† | Named relative window (see [Timeframe presets](#timeframe-presets)) as an alternative to `start_date`+`end_date` |
 | `flow` | string | No | Klaviyo flow id — filters results to one flow |
 | `resolve_message_names` | boolean | No | When `true`, resolve each `flow_message_id` to its human-readable message name (default `false`) |
+| `rollup` | boolean | No | When `true`, collapse the per-message/channel rows into one summed row per flow (default `false`) |
 
 † Provide **either** `start_date`+`end_date` **or** `timeframe`, not both. Omitting all three is an error.
+
+**`rollup` details:** By default each row is one (flow, message, channel)
+combination. With `rollup: true`, those rows are summed into one row per `flow_id`
+(counts added, rates rederived) with `flow_message_id`, `flow_message_name`, and
+`send_channel` set to `null` to mark a flow-level total. Rollup makes
+`resolve_message_names` moot (message identity is dropped), so its lookups are
+skipped when both are set.
 
 Ranges longer than one year are auto-chunked (see [Long date ranges
 (auto-chunking)](#long-date-ranges-auto-chunking)). Engagement and conversion
@@ -1315,9 +1323,15 @@ continues rather than aborting. See `live_smoke.py` for details.
   overall range capped at ~5 years; chunked responses carry a warning. See
   [Long date ranges (auto-chunking)](#long-date-ranges-auto-chunking)
 
-**Deferred to later work packages:**
+**WP-11 — done:**
 
-- Per-flow rollup
+- `rollup` option on `klaviyo_get_flow_performance` (default `false`): collapse the
+  per-(flow, message, channel) rows into one summed row per flow — counts added, rates rederived,
+  `flow_message_id`/`flow_message_name`/`send_channel` nulled. Reuses the chunk-merge summing and
+  skips message-name resolution (moot under rollup). See
+  [`klaviyo_get_flow_performance`](#klaviyo_get_flow_performance)
+
+**Deferred to later work packages:**
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials
 - Containerisation (`Dockerfile`, `docker-compose.yml`)

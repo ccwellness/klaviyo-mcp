@@ -903,6 +903,7 @@ class KlaviyoService:
         resolve_message_names: bool = False,
         *,
         timeframe: str | None = None,
+        rollup: bool = False,
     ) -> ServiceResponse:
         """Fetch per-(flow, message, channel) performance for an account over a date range.
 
@@ -917,11 +918,18 @@ class KlaviyoService:
         once via ``GET /api/flow-messages/{id}`` and its name attached to the matching rows; a
         failed/nameless lookup leaves ``flow_message_name`` as ``None`` and never blocks the
         metrics. The default (False) adds no extra calls and is byte-identical to before.
+
+        When ``rollup`` is True, the per-message/channel rows are collapsed to one row per flow:
+        counts are summed and rates rederived, with ``flow_message_id``/``flow_message_name``/
+        ``send_channel`` set to ``None`` to signal a flow-level total. Rollup makes
+        ``resolve_message_names`` moot (message identity is dropped), so the lookups are skipped.
         """
         resolved = self._registry.resolve(account)
         period = self._resolve_period(timeframe, start_date, end_date)
         rows, latency_ms = self._fetch_flow_metrics(resolved, period, flow)
-        if resolve_message_names:
+        if rollup:
+            rows = self._rollup_flows(rows)
+        elif resolve_message_names:
             rows = self._with_message_names(resolved.api_key, rows)
         data = {
             "flows": [row.to_dict() for row in rows],
@@ -1870,6 +1878,29 @@ class KlaviyoService:
         )
 
     # -- Flow message-name resolution -----------------------------------------
+
+    def _rollup_flows(self, rows: list[FlowMetrics]) -> list[FlowMetrics]:
+        """Collapse per-(message, channel) rows into one summed row per flow (first-seen order).
+
+        Reuses ``_sum_flow_metrics`` for the count/rate math, then nulls the message and channel
+        fields so the row reads as a flow-level total rather than a specific message.
+        """
+        grouped: dict[str, list[FlowMetrics]] = {}
+        order: list[str] = []
+        for row in rows:
+            if row.flow_id not in grouped:
+                grouped[row.flow_id] = []
+                order.append(row.flow_id)
+            grouped[row.flow_id].append(row)
+        return [
+            replace(
+                self._sum_flow_metrics(grouped[flow_id]),
+                flow_message_id=None,
+                send_channel=None,
+                flow_message_name=None,
+            )
+            for flow_id in order
+        ]
 
     def _with_message_names(self, api_key: str, rows: list[FlowMetrics]) -> list[FlowMetrics]:
         """Attach ``flow_message_name`` to each row, looking up each distinct id once.
