@@ -29,6 +29,9 @@ _DEFAULT_REST_HOST = "127.0.0.1"
 _DEFAULT_REST_PORT = 8080
 _DEFAULT_MAX_RETRIES = 3
 _DEFAULT_BASE_URL = "https://a.klaviyo.com"
+# Default response-cache TTL (seconds). Report data is historical and tightly rate-limited, so a
+# short cache is on by default; set CACHE_TTL_SECONDS=0 to disable and always fetch fresh.
+_DEFAULT_CACHE_TTL_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,9 @@ class Config:
     rest_port: int
     max_retries: int
     accounts_file: Path | None
+    # Response-cache TTL in seconds; 0 disables caching. Defaulted so existing constructions
+    # (and tests) that omit it are unaffected.
+    cache_ttl_seconds: int = _DEFAULT_CACHE_TTL_SECONDS
 
 
 def _get_int(env: Mapping[str, str], key: str, default: int) -> int:
@@ -92,6 +98,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         rest_port=_get_int(env, "REST_PORT", _DEFAULT_REST_PORT),
         max_retries=_get_int(env, "KLAVIYO_MAX_RETRIES", _DEFAULT_MAX_RETRIES),
         accounts_file=_resolve_accounts_file(env),
+        cache_ttl_seconds=_get_int(env, "CACHE_TTL_SECONDS", _DEFAULT_CACHE_TTL_SECONDS),
     )
 
 
@@ -109,6 +116,10 @@ def validate_config(cfg: Config, *, require_rest: bool = False) -> None:
     if cfg.max_retries < 0:
         raise KlaviyoServiceError(
             "CONFIG_ERROR", "KLAVIYO_MAX_RETRIES must not be negative", http_status=500
+        )
+    if cfg.cache_ttl_seconds < 0:
+        raise KlaviyoServiceError(
+            "CONFIG_ERROR", "CACHE_TTL_SECONDS must not be negative", http_status=500
         )
     if require_rest and not cfg.rest_api_key:
         raise KlaviyoServiceError(

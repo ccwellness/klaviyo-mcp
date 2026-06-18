@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import random
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx
 import structlog
 
+from klaviyo_analytics.cache import NoOpCache, ResponseCache, cache_key
 from klaviyo_analytics.errors import KlaviyoServiceError, map_exception
 
 if TYPE_CHECKING:
@@ -55,17 +56,20 @@ class KlaviyoClient:
         max_retries: int,
         *,
         client_factory: Callable[[str], httpx.Client] | None = None,
+        cache: ResponseCache | None = None,
     ) -> None:
-        """Wire the pinned revision, base URL, and retry budget.
+        """Wire the pinned revision, base URL, retry budget, and response cache.
 
         ``client_factory`` is an injection seam so tests can supply an ``httpx.Client`` bound
-        to a mock transport; production builds a real pooled client per API key.
+        to a mock transport; production builds a real pooled client per API key. ``cache``
+        defaults to a no-op (caching disabled) so an un-wired client behaves exactly as before.
         """
         self._revision = revision
         self._base_url = base_url.rstrip("/")
         self._max_retries = max_retries
         self._client_factory = client_factory or self._build_client
         self._clients_by_key: dict[str, httpx.Client] = {}
+        self._cache: ResponseCache = cache if cache is not None else NoOpCache()
 
     def _build_client(self, api_key: str) -> httpx.Client:
         """Build a pooled ``httpx.Client`` carrying the auth + revision headers for one key."""
@@ -91,27 +95,54 @@ class KlaviyoClient:
     def post(self, api_key: str, path: str, payload: dict) -> dict:
         """POST a JSON body and return the parsed JSON:API document as a plain dict.
 
-        Used for report endpoints (e.g. campaign-values-reports). Retries transient statuses
-        with backoff; maps any failure to a ``KlaviyoServiceError``.
+        Used for report endpoints (e.g. campaign-values-reports). A successful response is
+        cached (keyed by api key + path + payload); retries transient statuses with backoff and
+        maps any failure to a ``KlaviyoServiceError``.
         """
+        key = cache_key(api_key, "POST", path, payload)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cast(dict, cached)
         response = self._request_with_retry(api_key, "POST", path, json_body=payload)
-        return self._decode(response)
+        body = self._decode(response)
+        self._cache.set(key, body)
+        return body
 
     def get(self, api_key: str, path: str) -> dict:
         """GET a single JSON:API resource and return the parsed document as a plain dict.
 
         Used for single-resource lookups (e.g. ``/api/flow-messages/{id}``); the caller reads
-        ``body["data"]``, which may be a single object or a list depending on the endpoint.
-        Retries transient statuses with backoff; maps any failure to a ``KlaviyoServiceError``.
+        ``body["data"]``, which may be a single object or a list depending on the endpoint. A
+        successful response is cached; retries transient statuses with backoff and maps any
+        failure to a ``KlaviyoServiceError``.
         """
+        key = cache_key(api_key, "GET", path)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cast(dict, cached)
         response = self._request_with_retry(api_key, "GET", path)
-        return self._decode(response)
+        body = self._decode(response)
+        self._cache.set(key, body)
+        return body
 
     def get_paginated(self, api_key: str, path: str) -> list[dict]:
         """GET a JSON:API collection, following ``links.next`` until exhausted.
 
-        Returns the concatenated ``data`` arrays across pages. Bounded by ``_MAX_PAGES`` so a
-        cyclic ``next`` link cannot loop forever.
+        Returns the concatenated ``data`` arrays across pages, caching the assembled list under
+        the initial path so a repeated sweep is served without re-walking the cursor.
+        """
+        key = cache_key(api_key, "GET_PAGINATED", path)
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cast("list[dict]", cached)
+        collected = self._paginate(api_key, path)
+        self._cache.set(key, collected)
+        return collected
+
+    def _paginate(self, api_key: str, path: str) -> list[dict]:
+        """Walk ``links.next`` from ``path``, returning the concatenated ``data`` arrays.
+
+        Bounded by ``_MAX_PAGES`` so a cyclic ``next`` link cannot loop forever.
         """
         collected: list[dict] = []
         next_path: str | None = path

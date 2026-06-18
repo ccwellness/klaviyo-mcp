@@ -53,7 +53,8 @@ Layer responsibilities:
 | MCP adapter | `server.py` | JSON-RPC tool dispatch, `TextContent` rendering |
 | REST adapter | `api/__init__.py`, `api/routes.py` | Flask app factory, `X-API-Key` auth, route handlers |
 | Service | `klaviyo_analytics/service.py` | Account resolution, request building, metric math |
-| Client | `klaviyo_analytics/client.py` | HTTP, auth headers, pagination, retry/backoff |
+| Client | `klaviyo_analytics/client.py` | HTTP, auth headers, pagination, retry/backoff, response cache |
+| Cache | `klaviyo_analytics/cache.py` | In-memory TTL cache of successful responses (NoOp when disabled) |
 | Config | `klaviyo_analytics/config.py` | Env var loading, fail-fast validation |
 | Registry | `klaviyo_analytics/registry.py` | `accounts.toml` parsing, canonical-name resolution |
 
@@ -162,9 +163,30 @@ defaults to that account automatically.
 | `KLAVIYO_BASE_URL` | `https://a.klaviyo.com` | Override the Klaviyo base URL (useful for testing proxies) |
 | `KLAVIYO_REVISION` | `2025-04-15` | Pinned Klaviyo API revision header sent on every request |
 | `KLAVIYO_MAX_RETRIES` | `3` | Retry budget for `429`/`5xx` responses |
+| `CACHE_TTL_SECONDS` | `300` | Response-cache time-to-live in seconds; `0` disables caching (always fetch fresh). See [Response caching](#response-caching) |
 | `REST_HOST` | `127.0.0.1` | Interface for the Flask REST adapter |
 | `REST_PORT` | `8080` | Port for the Flask REST adapter |
 | `ACCOUNTS_FILE` | _(search path)_ | Explicit path to `accounts.toml` |
+
+### Response caching
+
+Klaviyo's report endpoints are tightly rate-limited (the values/series reports
+allow only **1 request/sec, 2/min, 225/day**), and the list tools issue several
+calls each, so the client keeps a small **in-memory TTL cache** of successful
+responses. A repeated identical request within the TTL is served from memory
+without touching Klaviyo — in practice a warm call returns in well under a
+millisecond versus ~700 ms cold.
+
+- **On by default** with a 300-second (5-minute) TTL. Report data is historical,
+  so brief staleness is an acceptable trade for staying clear of the rate limits.
+  A cache hit is visible as a near-zero `metadata.latency_ms`.
+- **Disable** with `CACHE_TTL_SECONDS=0` to always fetch fresh, or raise/lower the
+  TTL to taste.
+- Entries are keyed by account + method + path + request body (so accounts never
+  share data and distinct queries never collide), bounded with LRU eviction, and
+  isolated by deep copy so a cached body can't be mutated. Only successful
+  responses are cached — errors are never stored. The cache is process-local; it
+  resets when the MCP server or REST process restarts.
 
 ---
 
@@ -1210,11 +1232,17 @@ continues rather than aborting. See `live_smoke.py` for details.
   See [`klaviyo_get_list_growth_by_list`](#klaviyo_get_list_growth_by_list) and
   [`klaviyo_get_list_breakdown`](#klaviyo_get_list_breakdown)
 
+**WP-8 — done:**
+
+- In-memory TTL response cache (`klaviyo_analytics/cache.py`) wired into the client: successful
+  GET/POST/paginated responses are cached, keyed by account + method + path + body, with LRU
+  eviction and deep-copy isolation. On by default at a 300 s TTL (`CACHE_TTL_SECONDS`, `0` to
+  disable). Eases Klaviyo's report rate limits and makes repeated queries near-instant. See
+  [Response caching](#response-caching)
+
 **Deferred to later work packages:**
 
-- Response caching (NoOp → TTL cache)
 - Auto-chunking for date ranges exceeding one year
-- Metric-aggregates endpoint (event-time series for list growth / unsubscribes)
 - Per-flow rollup
 - OAuth / token-based auth for the REST adapter
 - Installer that writes the user-config directory and validates credentials

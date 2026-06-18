@@ -26,6 +26,7 @@ class TestLoadConfig:
         assert cfg.rest_host == "127.0.0.1"
         assert cfg.rest_port == 8080
         assert cfg.max_retries == 3
+        assert cfg.cache_ttl_seconds == 300
         # accounts_file may resolve to the sample accounts.toml in the project root;
         # assert the value is either None or a Path — not that it is absent.
         from pathlib import Path
@@ -62,6 +63,20 @@ class TestLoadConfig:
             load_config({"REST_PORT": "not-a-number"})
 
         assert exc_info.value.code == "CONFIG_ERROR"
+
+    def test_cache_ttl_parsed(self):
+        cfg = load_config({"CACHE_TTL_SECONDS": "120"})
+
+        assert cfg.cache_ttl_seconds == 120
+
+    def test_cache_ttl_zero_disables(self):
+        cfg = load_config({"CACHE_TTL_SECONDS": "0"})
+
+        assert cfg.cache_ttl_seconds == 0
+
+    def test_cache_ttl_invalid_raises_config_error(self):
+        with pytest.raises(KlaviyoServiceError):
+            load_config({"CACHE_TTL_SECONDS": "soon"})
 
     def test_max_retries_invalid_raises_config_error(self):
         with pytest.raises(KlaviyoServiceError) as exc_info:
@@ -128,6 +143,16 @@ class TestValidateConfig:
             max_retries=-1,
             accounts_file=None,
         )
+
+        with pytest.raises(KlaviyoServiceError) as exc_info:
+            validate_config(bad)
+
+        assert exc_info.value.code == "CONFIG_ERROR"
+
+    def test_negative_cache_ttl_raises(self, fake_cfg):
+        from dataclasses import replace
+
+        bad = replace(fake_cfg, cache_ttl_seconds=-1)
 
         with pytest.raises(KlaviyoServiceError) as exc_info:
             validate_config(bad)

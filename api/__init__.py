@@ -18,6 +18,7 @@ import structlog
 from flask import Flask, jsonify, request
 
 from api.routes import HEALTH_PATH, klaviyo_bp
+from klaviyo_analytics.cache import build_cache
 from klaviyo_analytics.client import KlaviyoClient
 from klaviyo_analytics.config import Config, load_config, validate_config
 from klaviyo_analytics.errors import KlaviyoServiceError, map_exception
@@ -36,7 +37,12 @@ _EXEMPT_PATHS: frozenset[str] = frozenset({HEALTH_PATH})
 
 def _build_service(cfg: Config) -> KlaviyoService:
     """Bootstrap a ``KlaviyoService``: build the client, then resolve the account registry."""
-    client = KlaviyoClient(cfg.revision, cfg.base_url, cfg.max_retries)
+    client = KlaviyoClient(
+        cfg.revision,
+        cfg.base_url,
+        cfg.max_retries,
+        cache=build_cache(cfg.cache_ttl_seconds),
+    )
     registry = load_registry(cfg.accounts_file)
     return KlaviyoService(client, registry, cfg)
 

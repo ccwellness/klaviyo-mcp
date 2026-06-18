@@ -20,6 +20,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from klaviyo_analytics.cache import build_cache
 from klaviyo_analytics.client import KlaviyoClient
 from klaviyo_analytics.config import Config, load_config, validate_config
 from klaviyo_analytics.errors import KlaviyoServiceError, map_exception
@@ -75,7 +76,12 @@ def build_service(cfg: Config) -> KlaviyoService:
     Fails fast: the registry resolves every referenced API key var at load time, so a
     missing credential aborts startup rather than surfacing on the first query (NFR-S5).
     """
-    client = KlaviyoClient(cfg.revision, cfg.base_url, cfg.max_retries)
+    client = KlaviyoClient(
+        cfg.revision,
+        cfg.base_url,
+        cfg.max_retries,
+        cache=build_cache(cfg.cache_ttl_seconds),
+    )
     registry = load_registry(cfg.accounts_file)
     return KlaviyoService(client, registry, cfg)
 
