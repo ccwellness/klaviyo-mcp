@@ -275,10 +275,10 @@ The Klaviyo private key configured for each account must have these scopes:
 | Scope | Used by |
 |---|---|
 | `accounts:read` | All tools (account resolution) |
-| `metrics:read` | All report tools; `klaviyo_get_list_growth` (metric discovery + metric-aggregates) |
+| `metrics:read` | All report tools; `klaviyo_get_list_growth`, `klaviyo_get_list_growth_by_list`, `klaviyo_get_list_breakdown` (metric discovery + metric-aggregates) |
 | `campaigns:read` | `klaviyo_get_campaign_performance`, `klaviyo_compare_periods` (entity `campaign`) |
 | `flows:read` | `klaviyo_get_flows`, `klaviyo_get_flow_performance`, `klaviyo_get_flow_structure`, `klaviyo_get_performance_over_time`, `klaviyo_compare_periods` (entity `flow`) |
-| `lists:read` | `klaviyo_get_list_health` |
+| `lists:read` | `klaviyo_get_list_health`, `klaviyo_get_list_growth_by_list`, `klaviyo_get_list_breakdown` (list enumeration + sizes) |
 
 Report endpoints (`/api/campaign-values-reports`, `/api/flow-values-reports`,
 `/api/flow-series-reports`) are rate-limited by
@@ -334,6 +334,8 @@ today. Omitting both the dates and a `timeframe` returns `INVALID_ARGUMENT`.
 | `klaviyo_compare_periods` | `POST /v1/performance/compare` | `entity` (`campaign`/`flow`), `start_date`+`end_date` **or** `timeframe`, `prior_start_date?`+`prior_end_date?`, `entity_id?` | `entity`, `current_period`, `prior_period`, `current_totals`, `prior_totals`, `deltas{metric:{absolute, pct_change}}`, `current_entity_count`, `prior_entity_count` |
 | `klaviyo_get_list_health` | `GET /v1/lists/health` | `list_id?` | `lists[]{list_id, name, opt_in_process, profile_count, created, updated}`, `list_count`, `total_profiles` |
 | `klaviyo_get_list_growth` | `POST /v1/lists/growth` | `start_date`+`end_date` **or** `timeframe` | `growth{list, email, sms}{subscribed, unsubscribed, net}` |
+| `klaviyo_get_list_growth_by_list` | `POST /v1/lists/growth-by-list` | `start_date`+`end_date` **or** `timeframe` | `lists[]{list_id, name, subscribed, unsubscribed, net}`, `list_count`, `totals` |
+| `klaviyo_get_list_breakdown` | `POST /v1/lists/breakdown` | `start_date`+`end_date` **or** `timeframe` | `lists[]{list_id, name, opt_in_process, profile_count, subscribed, unsubscribed, net}`, `list_count`, `totals` |
 
 ---
 
@@ -979,6 +981,86 @@ curl -X POST \
 
 ---
 
+### `klaviyo_get_list_growth_by_list`
+
+The per-list view of `klaviyo_get_list_growth`: one row per list with `subscribed`,
+`unsubscribed`, and `net` over the window, plus account-wide `totals`. The
+`Subscribed to List` / `Unsubscribed from List` metrics are each summed grouped
+by Klaviyo's `List` dimension (one metric-aggregates call apiece) and joined to
+list ids by name. Only lists with activity in the window appear.
+
+**Inputs:** `account?`, and the window as `start_date`+`end_date` **or**
+`timeframe` (see [Timeframe presets](#timeframe-presets)).
+
+**Output:**
+
+```json
+{
+  "data": {
+    "lists": [
+      {"list_id": "SrEULb", "name": "New Email Subs", "subscribed": 2554, "unsubscribed": 48, "net": 2506}
+    ],
+    "list_count": 5,
+    "totals": {"subscribed": 4630, "unsubscribed": 51, "net": 4579}
+  },
+  "metadata": {"account": "acme", "period": {"start_date": "2025-05-19", "end_date": "2025-06-17"}, "revision": "2025-04-15", "latency_ms": null},
+  "warnings": ["Counts are subscribe/unsubscribe events over the window, not deduplicated profiles; per-list rows are keyed by Klaviyo's list name and joined to the list id, so lists sharing a name may not be distinguishable."]
+}
+```
+
+Per-list rows are keyed by Klaviyo's list **name** (the `List` dimension value)
+and joined back to `/api/lists` to recover `list_id` — so a growth row for a
+deleted list, or one sharing a name with another list, may have a `null` or
+ambiguous `list_id`. `net` is `null` when a metric is absent on the account (with
+a warning). Requires `metrics:read` and `lists:read`.
+
+**REST equivalent:** `POST /v1/lists/growth-by-list`.
+
+---
+
+### `klaviyo_get_list_breakdown`
+
+The combined per-list view: each list's **current size** (`profile_count`,
+`opt_in_process`) *and* its **growth** (`subscribed`/`unsubscribed`/`net`) over
+the window, with account-wide `totals`. Every list is included — a list with no
+subscribe/unsubscribe activity in the window shows `0` (when the metric
+resolved). This merges `klaviyo_get_list_health` with the per-list growth above.
+
+**Inputs:** `account?`, and the window as `start_date`+`end_date` **or**
+`timeframe`.
+
+**Output:**
+
+```json
+{
+  "data": {
+    "lists": [
+      {"list_id": "SrEULb", "name": "New Email Subs", "opt_in_process": "single_opt_in", "profile_count": 24307, "subscribed": 2554, "unsubscribed": 48, "net": 2506}
+    ],
+    "list_count": 13,
+    "totals": {"profile_count": 43748, "subscribed": 4630, "unsubscribed": 51, "net": 4579}
+  },
+  "metadata": {"account": "acme", "period": {"start_date": "2025-05-19", "end_date": "2025-06-17"}, "revision": "2025-04-15", "latency_ms": null},
+  "warnings": ["Counts are subscribe/unsubscribe events over the window, not deduplicated profiles; ..."]
+}
+```
+
+Sizes come from the single-list endpoint (one request per list, as in
+`klaviyo_get_list_health`) and growth from two grouped metric-aggregates calls.
+Requires `metrics:read` and `lists:read`.
+
+**REST equivalent:** `POST /v1/lists/breakdown`.
+
+```bash
+curl -X POST \
+     -H "X-API-Key: your-rest-secret" \
+     -H "Content-Type: application/json" \
+     -d '{"account": "acme", "timeframe": "last_30_days"}' \
+     http://127.0.0.1:8080/v1/lists/breakdown
+```
+
+---
+
 ## Dev workflow
 
 ### Linting and type checking
@@ -1119,10 +1201,18 @@ continues rather than aborting. See `live_smoke.py` for details.
   lands the previously-deferred metric-aggregates integration. The growth counterpart to
   `klaviyo_get_list_health`. See [`klaviyo_get_list_growth`](#klaviyo_get_list_growth)
 
+**WP-7 — done:**
+
+- Two per-list tools: `klaviyo_get_list_growth_by_list` (`POST /v1/lists/growth-by-list`) —
+  subscribed/unsubscribed/net per list via the `Subscribed/Unsubscribed to List` metrics grouped
+  by Klaviyo's `List` dimension, joined to list ids by name — and `klaviyo_get_list_breakdown`
+  (`POST /v1/lists/breakdown`) — every list's current size *and* its window growth in one row.
+  See [`klaviyo_get_list_growth_by_list`](#klaviyo_get_list_growth_by_list) and
+  [`klaviyo_get_list_breakdown`](#klaviyo_get_list_breakdown)
+
 **Deferred to later work packages:**
 
 - Response caching (NoOp → TTL cache)
-- Per-list growth breakdown (subscribes/unsubscribes grouped by individual list)
 - Auto-chunking for date ranges exceeding one year
 - Metric-aggregates endpoint (event-time series for list growth / unsubscribes)
 - Per-flow rollup

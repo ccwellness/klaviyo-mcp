@@ -180,6 +180,34 @@ def list_growth() -> tuple[Response, int]:
     )
 
 
+@klaviyo_bp.post("/v1/lists/growth-by-list")
+def list_growth_by_list() -> tuple[Response, int]:
+    """Per-list subscribe/unsubscribe/net over a date range or timeframe preset."""
+    body = _json_body()
+    return _ok(
+        _service().get_list_growth_by_list(
+            body.get("account"),
+            body.get("start_date"),
+            body.get("end_date"),
+            timeframe=body.get("timeframe"),
+        )
+    )
+
+
+@klaviyo_bp.post("/v1/lists/breakdown")
+def list_breakdown() -> tuple[Response, int]:
+    """Each list's current size plus its growth over a date range or timeframe preset."""
+    body = _json_body()
+    return _ok(
+        _service().get_list_breakdown(
+            body.get("account"),
+            body.get("start_date"),
+            body.get("end_date"),
+            timeframe=body.get("timeframe"),
+        )
+    )
+
+
 # -- over-time series --------------------------------------------------------
 
 

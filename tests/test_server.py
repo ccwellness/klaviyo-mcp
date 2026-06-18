@@ -44,6 +44,8 @@ _EXPECTED_TOOL_NAMES = {
     "klaviyo_compare_periods",
     "klaviyo_get_list_health",
     "klaviyo_get_list_growth",
+    "klaviyo_get_list_growth_by_list",
+    "klaviyo_get_list_breakdown",
 }
 
 

@@ -69,6 +69,18 @@ _GROWTH_METRICS: dict[str, tuple[str, str]] = {
 # the bucket size is immaterial — "day" keeps each response small over the 366-day max window.
 _GROWTH_INTERVAL = "day"
 
+# metric-aggregates `by` dimension that splits the list subscribe/unsubscribe metrics per list.
+# Klaviyo reports the dimension value as the list's *name* (not id), so per-list rows are joined
+# back to ``/api/lists`` by name to recover the id.
+_GROWTH_LIST_DIMENSION = "List"
+
+# Surfaced on the per-list growth/breakdown tools.
+_LIST_GROWTH_NOTE = (
+    "Counts are subscribe/unsubscribe events over the window, not deduplicated profiles; per-list "
+    "rows are keyed by Klaviyo's list name and joined to the list id, so lists sharing a name may "
+    "not be distinguishable."
+)
+
 # Surfaced on list-health responses: list memberships overlap, so the per-list counts are not
 # a deduplicated audience total.
 _LIST_OVERLAP_NOTE = (
@@ -160,6 +172,25 @@ def _to_float(value: object) -> float:
 def _opt_str(value: object) -> str | None:
     """Return ``value`` when it is a non-empty string, else None (CS-016)."""
     return value if isinstance(value, str) and value else None
+
+
+def _sum_numeric(values: list) -> float:
+    """Sum the numeric entries of ``values``, skipping None/non-numeric (and bool) elements."""
+    return sum(v for v in values if isinstance(v, int | float) and not isinstance(v, bool))
+
+
+def _net_growth(subscribed: int | None, unsubscribed: int | None) -> int | None:
+    """Return ``subscribed - unsubscribed``, or None when either side is None (undefined)."""
+    if subscribed is None or unsubscribed is None:
+        return None
+    return subscribed - unsubscribed
+
+
+def _count_for(counts: dict[str, int] | None, name: str | None) -> int | None:
+    """Look up ``name`` in a per-name count map: 0 when absent, None when the map itself is None."""
+    if counts is None or name is None:
+        return None
+    return counts.get(name, 0)
 
 
 def _is_absolute_date(token: str) -> bool:
@@ -320,16 +351,11 @@ class KlaviyoService:
             path = f"{_LISTS_PATH}/{quote(validated, safe='')}?{_LIST_PROFILE_COUNT_QUERY}"
             body = self._client.get(resolved.api_key, path)
             data = body.get("data")
-            rows = [self._shape_list_health(data)] if isinstance(data, dict) else []
+            shaped = self._shape_list_health(data) if isinstance(data, dict) else None
+            present = [shaped] if shaped is not None else []
         else:
-            listing = self._client.get_paginated(resolved.api_key, _LISTS_PATH)
-            rows = [
-                self._list_health_with_count(resolved.api_key, row)
-                for row in listing
-                if isinstance(row, dict)
-            ]
+            present = self._all_list_health(resolved.api_key)
 
-        present = [row for row in rows if row is not None]
         total = sum(row.profile_count for row in present if row.profile_count is not None)
         data = {
             "lists": [row.to_dict() for row in present],
@@ -343,6 +369,14 @@ class KlaviyoService:
             latency_ms=None,
         )
         return ServiceResponse(data=data, metadata=meta, warnings=(_LIST_OVERLAP_NOTE,))
+
+    def _all_list_health(self, api_key: str) -> list[ListHealth]:
+        """Enumerate every list and resolve each one's current size (the bulk health path)."""
+        listing = self._client.get_paginated(api_key, _LISTS_PATH)
+        rows = [
+            self._list_health_with_count(api_key, row) for row in listing if isinstance(row, dict)
+        ]
+        return [row for row in rows if row is not None]
 
     def _list_health_with_count(self, api_key: str, row: dict) -> ListHealth | None:
         """Return a list's health enriched with its profile_count.
@@ -490,24 +524,27 @@ class KlaviyoService:
             return None
         return self._sum_aggregate_counts(body)
 
-    def _metric_aggregate_body(self, metric_id: str, period: ReportPeriod) -> dict:
-        """Build a metric-aggregate request summing ``count`` across the period (end inclusive)."""
+    def _metric_aggregate_body(
+        self, metric_id: str, period: ReportPeriod, *, by: list[str] | None = None
+    ) -> dict:
+        """Build a metric-aggregate request summing ``count`` across the period (end inclusive).
+
+        ``by`` groups the result by an event dimension (e.g. ``["List"]`` to split per list).
+        """
         end_exclusive = (date.fromisoformat(period.end_date) + timedelta(days=1)).isoformat()
-        return {
-            "data": {
-                "type": _METRIC_AGGREGATE_TYPE,
-                "attributes": {
-                    "metric_id": metric_id,
-                    "measurements": ["count"],
-                    "interval": _GROWTH_INTERVAL,
-                    "filter": [
-                        f"greater-or-equal(datetime,{period.start_date}T00:00:00)",
-                        f"less-than(datetime,{end_exclusive}T00:00:00)",
-                    ],
-                    "timezone": "UTC",
-                },
-            }
+        attributes: dict = {
+            "metric_id": metric_id,
+            "measurements": ["count"],
+            "interval": _GROWTH_INTERVAL,
+            "filter": [
+                f"greater-or-equal(datetime,{period.start_date}T00:00:00)",
+                f"less-than(datetime,{end_exclusive}T00:00:00)",
+            ],
+            "timezone": "UTC",
         }
+        if by is not None:
+            attributes["by"] = list(by)
+        return {"data": {"type": _METRIC_AGGREGATE_TYPE, "attributes": attributes}}
 
     def _sum_aggregate_counts(self, body: dict) -> int:
         """Sum every bucket of the ``count`` measurement across a metric-aggregate response."""
@@ -520,12 +557,201 @@ class KlaviyoService:
                 measurements = row.get("measurements") if isinstance(row, dict) else None
                 counts = measurements.get("count") if isinstance(measurements, dict) else None
                 if isinstance(counts, list):
-                    total += sum(
-                        value
-                        for value in counts
-                        if isinstance(value, int | float) and not isinstance(value, bool)
-                    )
+                    total += _sum_numeric(counts)
         return int(total)
+
+    # -- Per-list growth + breakdown -----------------------------------------
+
+    def get_list_growth_by_list(
+        self,
+        account: str | None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        *,
+        timeframe: str | None = None,
+    ) -> ServiceResponse:
+        """Subscribed/unsubscribed/net per list over a period (the List metrics split by list).
+
+        The window is a ``timeframe`` preset or an explicit ``start_date``/``end_date`` pair. The
+        ``Subscribed to List`` / ``Unsubscribed from List`` metrics are each summed grouped by the
+        ``List`` dimension (one metric-aggregates call apiece) and joined to list ids by name. Only
+        lists with subscribe/unsubscribe activity in the window appear; ``totals`` are the
+        account-wide sums. Counts are events, not deduplicated profiles.
+        """
+        resolved = self._registry.resolve(account)
+        period = self._resolve_period(timeframe, start_date, end_date)
+        unresolved: list[str] = []
+        subscribed, unsubscribed = self._list_growth_counts(resolved.api_key, period, unresolved)
+        name_to_id = self._list_name_to_id(resolved.api_key)
+
+        names = sorted(set(subscribed or {}) | set(unsubscribed or {}))
+        rows = [
+            {
+                "list_id": name_to_id.get(name),
+                "name": name,
+                **self._growth_cell(subscribed, unsubscribed, name),
+            }
+            for name in names
+        ]
+        data = {
+            "lists": rows,
+            "list_count": len(rows),
+            "totals": self._growth_totals(subscribed, unsubscribed),
+        }
+        meta = ResponseMeta(
+            account=resolved.name, period=period, revision=self._cfg.revision, latency_ms=None
+        )
+        return ServiceResponse(
+            data=data, metadata=meta, warnings=self._list_growth_warnings(unresolved)
+        )
+
+    def get_list_breakdown(
+        self,
+        account: str | None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        *,
+        timeframe: str | None = None,
+    ) -> ServiceResponse:
+        """Every list's current size plus its subscribed/unsubscribed/net over a period.
+
+        Combines ``get_list_health`` (per-list ``profile_count`` and ``opt_in_process``) with the
+        per-list growth from ``get_list_growth_by_list``: each list — including those with no
+        growth activity (count ``0`` when the metric resolved) — carries both its current size and
+        its window growth. ``totals`` sum profiles and growth across all lists.
+        """
+        resolved = self._registry.resolve(account)
+        period = self._resolve_period(timeframe, start_date, end_date)
+        unresolved: list[str] = []
+        health = self._all_list_health(resolved.api_key)
+        subscribed, unsubscribed = self._list_growth_counts(resolved.api_key, period, unresolved)
+
+        rows = [
+            {
+                "list_id": row.list_id,
+                "name": row.name,
+                "opt_in_process": row.opt_in_process,
+                "profile_count": row.profile_count,
+                **self._growth_cell(subscribed, unsubscribed, row.name),
+            }
+            for row in health
+        ]
+        totals = {
+            "profile_count": sum(r.profile_count for r in health if r.profile_count is not None),
+            **self._growth_totals(subscribed, unsubscribed),
+        }
+        data = {"lists": rows, "list_count": len(rows), "totals": totals}
+        meta = ResponseMeta(
+            account=resolved.name, period=period, revision=self._cfg.revision, latency_ms=None
+        )
+        return ServiceResponse(
+            data=data, metadata=meta, warnings=self._list_growth_warnings(unresolved)
+        )
+
+    def _list_growth_counts(
+        self, api_key: str, period: ReportPeriod, unresolved: list[str]
+    ) -> tuple[dict[str, int] | None, dict[str, int] | None]:
+        """Return ``(subscribed_by_name, unsubscribed_by_name)`` for the List metrics.
+
+        Each value is a ``{list name: count}`` map, or ``None`` when that metric is absent on the
+        account (recorded in ``unresolved``) — so a missing metric is distinguishable from a list
+        that simply had zero events.
+        """
+        name_to_id = self._discover_metric_ids(api_key)
+        sub_name, unsub_name = _GROWTH_METRICS["list"]
+        subscribed = self._grouped_metric_counts(api_key, name_to_id, sub_name, period, unresolved)
+        unsubscribed = self._grouped_metric_counts(
+            api_key, name_to_id, unsub_name, period, unresolved
+        )
+        return subscribed, unsubscribed
+
+    def _grouped_metric_counts(
+        self,
+        api_key: str,
+        name_to_id: dict[str, str],
+        metric_name: str,
+        period: ReportPeriod,
+        unresolved: list[str],
+    ) -> dict[str, int] | None:
+        """Sum a metric's count grouped by the ``List`` dimension; None if absent/failed."""
+        metric_id = name_to_id.get(metric_name)
+        if metric_id is None:
+            unresolved.append(metric_name)
+            return None
+        attributes = self._metric_aggregate_body(metric_id, period, by=[_GROWTH_LIST_DIMENSION])
+        try:
+            body = self._client.post(api_key, _METRIC_AGGREGATES_PATH, attributes)
+        except KlaviyoServiceError:
+            log.info("klaviyo.metric_aggregate.grouped_failed", metric=metric_name)
+            return None
+        return self._sum_grouped_counts(body)
+
+    def _sum_grouped_counts(self, body: dict) -> dict[str, int]:
+        """Return ``{dimension value: summed count}`` from a grouped metric-aggregate response."""
+        data = body.get("data")
+        attributes = data.get("attributes") if isinstance(data, dict) else None
+        rows = attributes.get("data") if isinstance(attributes, dict) else None
+        out: dict[str, int] = {}
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            dimensions = row.get("dimensions")
+            name = dimensions[0] if isinstance(dimensions, list) and dimensions else None
+            if not isinstance(name, str):
+                continue
+            measurements = row.get("measurements")
+            counts = measurements.get("count") if isinstance(measurements, dict) else None
+            value = _sum_numeric(counts) if isinstance(counts, list) else 0.0
+            out[name] = out.get(name, 0) + int(value)
+        return out
+
+    def _list_name_to_id(self, api_key: str) -> dict[str, str]:
+        """Return a ``{list name: list id}`` map from ``GET /api/lists`` (first id per name)."""
+        listing = self._client.get_paginated(api_key, _LISTS_PATH)
+        mapping: dict[str, str] = {}
+        for row in listing:
+            if not isinstance(row, dict):
+                continue
+            list_id = row.get("id")
+            raw_attributes = row.get("attributes")
+            attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
+            name = attributes.get("name")
+            if isinstance(list_id, str) and isinstance(name, str) and name:
+                mapping.setdefault(name, list_id)
+        return mapping
+
+    def _growth_cell(
+        self,
+        subscribed: dict[str, int] | None,
+        unsubscribed: dict[str, int] | None,
+        name: str | None,
+    ) -> dict:
+        """Return the ``{subscribed, unsubscribed, net}`` block for one list name."""
+        sub = _count_for(subscribed, name)
+        unsub = _count_for(unsubscribed, name)
+        return {"subscribed": sub, "unsubscribed": unsub, "net": _net_growth(sub, unsub)}
+
+    def _growth_totals(
+        self, subscribed: dict[str, int] | None, unsubscribed: dict[str, int] | None
+    ) -> dict:
+        """Return account-wide ``{subscribed, unsubscribed, net}`` (None when a metric absent)."""
+        total_sub = None if subscribed is None else sum(subscribed.values())
+        total_unsub = None if unsubscribed is None else sum(unsubscribed.values())
+        return {
+            "subscribed": total_sub,
+            "unsubscribed": total_unsub,
+            "net": _net_growth(total_sub, total_unsub),
+        }
+
+    def _list_growth_warnings(self, unresolved: list[str]) -> tuple[str, ...]:
+        """Assemble the per-list growth warnings (event-count note + any unresolved metrics)."""
+        warnings = [_LIST_GROWTH_NOTE]
+        if unresolved:
+            names = ", ".join(sorted(set(unresolved)))
+            warnings.append(f"These growth metrics were not found for this account: {names}.")
+        return tuple(warnings)
 
     def get_flow_performance(  # noqa: PLR0913 — fixed public flow-performance surface (TRD §7)
         self,

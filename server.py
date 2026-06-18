@@ -54,6 +54,16 @@ _TIMEFRAME_DESC = (
 )
 
 
+def _window_properties() -> dict:
+    """The standard account + date-window input properties shared by date-scoped tools."""
+    return {
+        "account": {"type": "string", "description": _ACCOUNT_DESC},
+        "start_date": {"type": "string", "description": _DATE_DESC},
+        "end_date": {"type": "string", "description": _DATE_DESC},
+        "timeframe": {"type": "string", "enum": _TIMEFRAME_VALUES, "description": _TIMEFRAME_DESC},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Service seam (bootstrap)
 # ---------------------------------------------------------------------------
@@ -162,6 +172,26 @@ def handle_list_growth(service: KlaviyoService, args: dict) -> ServiceResponse:
     )
 
 
+def handle_list_growth_by_list(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Return per-list subscribe/unsubscribe/net over a date range or preset."""
+    return service.get_list_growth_by_list(
+        args.get("account"),
+        args.get("start_date"),
+        args.get("end_date"),
+        timeframe=args.get("timeframe"),
+    )
+
+
+def handle_list_breakdown(service: KlaviyoService, args: dict) -> ServiceResponse:
+    """Return each list's current size plus its growth over a date range or preset."""
+    return service.get_list_breakdown(
+        args.get("account"),
+        args.get("start_date"),
+        args.get("end_date"),
+        timeframe=args.get("timeframe"),
+    )
+
+
 def handle_performance_over_time(service: KlaviyoService, args: dict) -> ServiceResponse:
     """Fetch a bucketed over-time series for a flow."""
     statistics = args.get("statistics")
@@ -201,6 +231,8 @@ HANDLERS: dict[str, Handler] = {
     "klaviyo_compare_periods": handle_compare_periods,
     "klaviyo_get_list_health": handle_list_health,
     "klaviyo_get_list_growth": handle_list_growth,
+    "klaviyo_get_list_growth_by_list": handle_list_growth_by_list,
+    "klaviyo_get_list_breakdown": handle_list_breakdown,
 }
 
 
@@ -471,16 +503,41 @@ async def list_tools() -> list[Tool]:
             ),
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "account": {"type": "string", "description": _ACCOUNT_DESC},
-                    "start_date": {"type": "string", "description": _DATE_DESC},
-                    "end_date": {"type": "string", "description": _DATE_DESC},
-                    "timeframe": {
-                        "type": "string",
-                        "enum": _TIMEFRAME_VALUES,
-                        "description": _TIMEFRAME_DESC,
-                    },
-                },
+                "properties": _window_properties(),
+                "required": [],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_list_growth_by_list",
+            description=(
+                "Per-list subscribe/unsubscribe/net over a date range: one row per list with "
+                "subscribed, unsubscribed, and net event counts, plus account-wide totals. The "
+                "List subscribe/unsubscribe metrics are split by list. Only lists with activity "
+                "in the window appear. Specify the window with a 'timeframe' preset or "
+                "start_date+end_date. Counts are events, not deduplicated profiles. For current "
+                "sizes use klaviyo_get_list_health; for size + growth per list use "
+                "klaviyo_get_list_breakdown."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": _window_properties(),
+                "required": [],
+            },
+        ),
+        Tool(
+            name="klaviyo_get_list_breakdown",
+            description=(
+                "Per-list size AND growth: one row per list with its current profile_count and "
+                "opt_in_process plus subscribed/unsubscribed/net over the window, with "
+                "account-wide totals. Every list is included (growth 0 when it had no activity). "
+                "Specify the "
+                "window with a 'timeframe' preset or start_date+end_date. Combines "
+                "klaviyo_get_list_health (sizes) with per-list growth; counts are events, not "
+                "deduplicated profiles."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": _window_properties(),
                 "required": [],
             },
         ),
