@@ -11,6 +11,12 @@ and SMS performance data through two transports that share one service layer:
 Both transports return identical data; they are thin adapters over the same
 `KlaviyoService`.
 
+**Specifications.** [`docs/BRD.md`](docs/BRD.md) (business requirements) and
+[`docs/TRD.md`](docs/TRD.md) (technical design) document the complete, as-built
+system — including the tool surface (TRD §7), error taxonomy, security
+requirements (NFR-S), and coding standards (CS-xxx) referenced throughout the
+code.
+
 **Multi-account support.** Accounts are addressed by a short canonical name
 (e.g. `acme`). Raw API keys never appear in prompts, logs, or tool arguments —
 only the name does. The non-secret account manifest (`accounts.toml`) maps
