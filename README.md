@@ -11,7 +11,9 @@ and SMS performance data through two transports that share one service layer:
 Both transports return identical data; they are thin adapters over the same
 `KlaviyoService`.
 
-**Specifications.** [`docs/BRD.md`](docs/BRD.md) (business requirements) and
+**Documentation.** [`docs/TOOLSET_GUIDE.md`](docs/TOOLSET_GUIDE.md) is the
+practical, per-tool user guide (what each tool does, MCP **and** REST, and the
+metrics it returns). [`docs/BRD.md`](docs/BRD.md) (business requirements) and
 [`docs/TRD.md`](docs/TRD.md) (technical design) document the complete, as-built
 system — including the tool surface (TRD §7), error taxonomy, security
 requirements (NFR-S), and coding standards (CS-xxx) referenced throughout the
