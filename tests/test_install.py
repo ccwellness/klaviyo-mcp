@@ -118,24 +118,27 @@ class TestLoadEnv:
 
         assert merged["TOKEN"] == "from_environ"
 
-    def test_earlier_file_wins(self, tmp_path, monkeypatch):
+    def test_first_existing_file_wins(self, tmp_path, monkeypatch):
+        # Both files exist -> only the first (highest-priority) is loaded, like the server.
         monkeypatch.delenv("TOKEN", raising=False)
+        monkeypatch.delenv("ONLY_IN_FALLBACK", raising=False)
         primary = tmp_path / "a.env"
         fallback = tmp_path / "b.env"
         _write(primary, "TOKEN=primary\n")
-        _write(fallback, "TOKEN=fallback\n")
+        _write(fallback, "TOKEN=fallback\nONLY_IN_FALLBACK=yes\n")
 
         merged = install._load_env(primary, fallback)
 
         assert merged["TOKEN"] == "primary"
+        # The second file is ignored entirely when the first exists (no merge).
+        assert "ONLY_IN_FALLBACK" not in merged
 
-    def test_fallback_fills_missing(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("ONLY_IN_FALLBACK", raising=False)
-        primary = tmp_path / "a.env"
+    def test_uses_fallback_when_primary_absent(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TOKEN", raising=False)
+        primary = tmp_path / "absent.env"  # never created
         fallback = tmp_path / "b.env"
-        _write(primary, "X=1\n")
-        _write(fallback, "ONLY_IN_FALLBACK=yes\n")
+        _write(fallback, "TOKEN=fallback\n")
 
         merged = install._load_env(primary, fallback)
 
-        assert merged["ONLY_IN_FALLBACK"] == "yes"
+        assert merged["TOKEN"] == "fallback"

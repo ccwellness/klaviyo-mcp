@@ -123,8 +123,25 @@ python install.py --check-api     # also verify each key against Klaviyo
 python install.py --config-dir ./somewhere --no-scaffold   # validate only, custom dir
 ```
 
+**Windows one-step:** `install.bat` bootstraps the Python 3.11 virtual environment
+and dependencies (if `.venv` is missing) and then runs the configurator, passing
+through any arguments:
+
+```bat
+install.bat                 :: set up venv + deps, then scaffold + validate
+install.bat --check-api     :: also verify each key against Klaviyo
+install.bat --no-scaffold   :: validate an existing config without writing templates
+```
+
 Fill in the scaffolded `.env` and `accounts.toml` with your real values, then
 re-run to confirm. The two files are described below.
+
+> Note: the bare `install.py` / `install.bat` scaffolds a template `.env` into the
+> per-user config directory if one is absent there. If your real keys already live
+> in the **repo-root** `.env` instead, run with `--no-scaffold` so the per-user
+> template doesn't shadow it; validation reads the same single `.env` the server
+> loads (highest-priority existing file), so it reflects exactly what the server
+> will see.
 
 ### Secrets: `.env`
 

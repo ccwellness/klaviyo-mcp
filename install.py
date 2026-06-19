@@ -152,8 +152,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("\nTemplates already present (not overwritten).")
 
-    # Resolve the env the way the server does: real env wins, then the config-dir .env, then the
-    # repo-root .env (so a dev setup with keys in the repo .env validates too).
+    # Resolve the env exactly as the server does: real env wins, then the first .env that exists
+    # (config-dir preferred, repo-root fallback) — only one, never a merge, so validation reflects
+    # what the server will actually load.
     env = _load_env(config_dir / ".env", repo / ".env")
 
     print("\nValidating configuration:")
@@ -177,10 +178,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _load_env(*env_files: Path) -> dict[str, str]:
-    """Return os.environ overlaid with each .env in priority order (earlier files win).
+    """Return os.environ overlaid with the FIRST ``.env`` that exists, in the given order.
 
-    A real environment variable always wins; among the files, the first listed takes precedence
-    (``setdefault`` only fills values not already seen). Mirrors how the server resolves ``.env``.
+    This mirrors how the server resolves ``.env`` exactly: it loads only the highest-priority
+    existing file (not a merge of several), so validation can never report a key as present that
+    the server would not actually load. A real environment variable always wins.
     """
     from dotenv import dotenv_values
 
@@ -190,6 +192,7 @@ def _load_env(*env_files: Path) -> dict[str, str]:
             for key, value in dotenv_values(env_file).items():
                 if value is not None:
                     merged.setdefault(key, value)
+            break  # the server loads only the first existing .env; match that
     return merged
 
 
